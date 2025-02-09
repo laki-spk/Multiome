@@ -26,10 +26,9 @@ library(HDF5Array)
 library(bigstatsr)
 library(hdf5r)
 
-#Read in 10X data
-
-D.data <- Read10X_h5("D:/D_Multiome/filtered_feature_bc_matrix.h5")
-L.data <- Read10X_h5("D:/filtered_feature_bc_matrix.h5")
+# Load hdf5 files from CellRanger for both D and L datasets
+inputdata.D <- Read10X_h5("/path/to/D/filtered_feature_bc_matrix.h5")
+inputdata.L <- Read10X_h5("/path/to/L/filtered_feature_bc_matrix.h5")
 
 # Extract RNA and ATAC data
 rna_counts.D <- inputdata.D$`Gene Expression`
@@ -66,10 +65,22 @@ D <- SCTransform(D, vars.to.regress = "percent.mt", verbose = FALSE)
 L <- SCTransform(L, vars.to.regress = "percent.mt", verbose = FALSE)
 
 # Integrate D and L into a new object 'Multi'
+# First, run Harmony for batch effect correction
+library(harmony)
+
+# Run Harmony on the PCA embeddings to adjust for batch effects
+D <- RunPCA(D)
+L <- RunPCA(L)
+
+# Run Harmony using the "batch" parameter to account for dataset-specific variations (e.g., "Dataset")
+D <- RunHarmony(D, group.by.vars = "batch")
+L <- RunHarmony(L, group.by.vars = "batch")
+
+# Integrate D and L after Harmony correction
 anchors <- FindIntegrationAnchors(object.list = list(D, L), dims = 1:30)
 Multi <- IntegrateData(anchorset = anchors, dims = 1:30)
 
-# Re-run PCA and clustering for integrated object Multi
+# Re-run PCA for integrated object Multi, which now includes Harmony correction
 DefaultAssay(Multi) <- "RNA"
 Multi <- ScaleData(Multi)
 Multi <- RunPCA(Multi)
@@ -88,6 +99,7 @@ p1 <- DimPlot(Multi, reduction = "umap.rna", label = TRUE, label.size = 2.5, rep
 p2 <- DimPlot(Multi, reduction = "umap.atac", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("ATAC")
 p3 <- DimPlot(Multi, reduction = "wnn.umap", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("WNN")
 p1 + p2 + p3 & NoLegend() & theme(plot.title = element_text(hjust = 0.5))
+
 
 
 marker_genes <- list(
