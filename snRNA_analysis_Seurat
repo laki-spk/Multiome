@@ -1,0 +1,114 @@
+library(dplyr)
+library(Seurat)
+library(patchwork)
+install.packages('BiocManager')
+BiocManager::install('limma')
+
+library(harmony)
+library(plyr)
+library(cowplot)
+library(readr)
+library(patchwork)
+library(Matrix)
+library(dplyr)
+library(tibble) 
+library(Seurat)
+library(clustree)
+library(ggplot2)
+library(gridExtra)
+library(AUCell)
+require(data.table)
+library(multtest)
+library(metap)
+library(stringr)
+library(magrittr)
+library(HDF5Array)
+library(bigstatsr)
+library(hdf5r)
+
+#Read in 10X data
+
+D.data <- Read10X_h5("D:/D_Multiome/filtered_feature_bc_matrix.h5")
+L.data <- Read10X_h5("D:/filtered_feature_bc_matrix.h5")
+
+# Extract RNA and ATAC data
+rna_counts.D <- inputdata.D$`Gene Expression`
+atac_counts.D <- inputdata.D$Peaks
+rna_counts.L <- inputdata.L$`Gene Expression`
+atac_counts.L <- inputdata.L$Peaks
+
+# Create Seurat objects for D and L
+D <- CreateSeuratObject(counts = rna_counts.D)
+L <- CreateSeuratObject(counts = rna_counts.L)
+
+# Add mitochondrial percentage for both D and L
+D[["percent.mt"]] <- PercentageFeatureSet(D, pattern = "^mt-")
+L[["percent.mt"]] <- PercentageFeatureSet(L, pattern = "^mt-")
+
+# Visualize QC metrics for D
+VlnPlot(D, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+plot1.D <- FeatureScatter(D, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2.D <- FeatureScatter(D, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1.D + plot2.D
+D <- subset(D, subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 5)
+
+# Visualize QC metrics for L
+VlnPlot(L, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+plot1.L <- FeatureScatter(L, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2.L <- FeatureScatter(L, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1.L + plot2.L
+L <- subset(L, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+
+# RNA analysis for D using SCTransform
+D <- SCTransform(D, vars.to.regress = "percent.mt", verbose = FALSE)
+
+# RNA analysis for L using SCTransform
+L <- SCTransform(L, vars.to.regress = "percent.mt", verbose = FALSE)
+
+# Integrate D and L into a new object 'Multi'
+anchors <- FindIntegrationAnchors(object.list = list(D, L), dims = 1:30)
+Multi <- IntegrateData(anchorset = anchors, dims = 1:30)
+
+# Re-run PCA and clustering for integrated object Multi
+DefaultAssay(Multi) <- "RNA"
+Multi <- ScaleData(Multi)
+Multi <- RunPCA(Multi)
+
+# Find neighbors and clusters for Multi
+Multi <- FindNeighbors(Multi, reduction = "pca", dims = 1:30)
+Multi <- FindClusters(Multi, resolution = 1)
+
+# Calculate WNN for Multi
+Multi <- FindMultiModalNeighbors(Multi, reduction.list = list("pca", "lsi"), dims.list = list(1:50, 2:50))
+Multi <- RunUMAP(Multi, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+Multi <- FindClusters(Multi, graph.name = "wsnn", algorithm = 3, verbose = FALSE)
+
+# Plot clusters
+p1 <- DimPlot(Multi, reduction = "umap.rna", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("RNA")
+p2 <- DimPlot(Multi, reduction = "umap.atac", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("ATAC")
+p3 <- DimPlot(Multi, reduction = "wnn.umap", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("WNN")
+p1 + p2 + p3 & NoLegend() & theme(plot.title = element_text(hjust = 0.5))
+
+
+marker_genes <- list(
+  CM = c("Tnnt2", "Actc1", "Myh6", "Myh7", "Myl2", "Myl7"),
+  EC = c("Pecam1", "Cdh5", "Vegfa", "Kdr", "Nos3"),
+  SMC = c("Acta2", "Tagln", "Myh11", "Smtn"),
+  FB = c("Col1a1", "Col3a1", "Postn", "Dcn", "Tcf21"),
+  Macro = c("Adgre1", "Cd68", "Itgam", "Csf1r", "Mrc1"),
+  B_cells = c("Cd19", "Cd79a", "Ms4a1"),   
+  T_cells = c("Cd3e", "Cd4", "Cd8a", "Il7r"),
+  Meso = c("Msln", "Wt1"),
+  Pericytes = c("Pdgfrb", "Cspg4", "Anpep"),
+  Mono = c("Cd14", "Ms4a7"),
+  NK = c("Nkg7"),
+  DC = c("Cst3")
+)
+
+# Plot violin plots for marker genes
+for (celltype in names(marker_genes)) {
+  plot <- VlnPlot(Multi, features = marker_genes[[celltype]], pt.size = 0.1, ncol = 2)
+  ggsave(paste0(celltype, "_violin_plot.png"), plot = plot, width = 10, height = 6)
+}
+
+
