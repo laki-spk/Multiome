@@ -27,8 +27,8 @@ library(bigstatsr)
 library(hdf5r)
 
 # Load hdf5 files from CellRanger for both D and L datasets
-inputdata.D <- Read10X_h5("/path/to/D/filtered_feature_bc_matrix.h5")
-inputdata.L <- Read10X_h5("/path/to/L/filtered_feature_bc_matrix.h5")
+inputdata.D <- Read10X_h5("D:/Doa_Multiome/filtered_feature_bc_matrix.h5")
+inputdata.L <- Read10X_h5("D:/filtered_feature_bc_matrix.h5")
 
 # Extract RNA and ATAC data
 rna_counts.D <- inputdata.D$`Gene Expression`
@@ -90,15 +90,14 @@ Multi <- FindNeighbors(Multi, reduction = "pca", dims = 1:30)
 Multi <- FindClusters(Multi, resolution = 1)
 
 # Calculate WNN for Multi
-Multi <- FindMultiModalNeighbors(Multi, reduction.list = list("pca", "lsi"), dims.list = list(1:50, 2:50))
+Multi <- FindMultiModalNeighbors(Multi, reduction.list = list("pca"), dims.list = list(1:50))
 Multi <- RunUMAP(Multi, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
 Multi <- FindClusters(Multi, graph.name = "wsnn", algorithm = 3, verbose = FALSE)
 
 # Plot clusters
 p1 <- DimPlot(Multi, reduction = "umap.rna", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("RNA")
-p2 <- DimPlot(Multi, reduction = "umap.atac", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("ATAC")
-p3 <- DimPlot(Multi, reduction = "wnn.umap", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("WNN")
-p1 + p2 + p3 & NoLegend() & theme(plot.title = element_text(hjust = 0.5))
+p2 <- DimPlot(Multi, reduction = "wnn.umap", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("WNN")
+p1 + p2  & NoLegend() & theme(plot.title = element_text(hjust = 0.5))
 
 
 
