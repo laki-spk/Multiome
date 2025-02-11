@@ -60,18 +60,6 @@ Multi <- RunUMAP(Multi, reduction = "harmony", dims = 1:30)
 # Plot UMAP
 DimPlot(Multi, reduction = "umap", label = TRUE, repel = TRUE) + ggtitle("Integrated UMAP with Harmony")
 
-# Calculate WNN for Multi
-Multi <- FindMultiModalNeighbors(Multi, reduction.list = list("pca"), dims.list = list(1:50))
-Multi <- RunUMAP(Multi, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
-Multi <- FindClusters(Multi, graph.name = "wsnn", algorithm = 3, verbose = FALSE)
-
-# Plot clusters
-p1 <- DimPlot(Multi, reduction = "umap.rna", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("RNA")
-p2 <- DimPlot(Multi, reduction = "wnn.umap", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("WNN")
-p1 + p2  & NoLegend() & theme(plot.title = element_text(hjust = 0.5))
-
-
-
 marker_genes <- list(
   CM = c("Tnnt2", "Actc1", "Myh6", "Myh7", "Myl2", "Myl7"),
   EC = c("Pecam1", "Cdh5", "Vegfa", "Kdr", "Nos3"),
@@ -87,10 +75,36 @@ marker_genes <- list(
   DC = c("Cst3")
 )
 
+
+DotPlot(Multi, features = marker_genes) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
 # Plot violin plots for marker genes
 for (celltype in names(marker_genes)) {
   plot <- VlnPlot(Multi, features = marker_genes[[celltype]], pt.size = 0.1, ncol = 2)
-  ggsave(paste0(celltype, "_violin_plot.png"), plot = plot, width = 10, height = 6)
+  ggsave(paste0(celltype, "_violin_plot.png"), plot = plot, width = 20, height = 10)
 }
+
+# Calculate module scores for each cell type
+for (cell_type in names(marker_genes)) {
+  Multi <- AddModuleScore(Multi, features = list(marker_genes[[cell_type]]), name = cell_type)
+}
+
+# Loop through each module and plot UMAP
+for (cell_type in names(marker_genes)) {
+  p <- FeaturePlot(Multi, features = paste0(cell_type, "1"), min.cutoff = "q10", max.cutoff = "q90") +
+    ggtitle(cell_type)
+  
+  ggsave(filename = paste0(cell_type, "_UMAP.png"), plot = p, width = 6, height = 5, dpi = 300)
+}
+
+vln_plot <- VlnPlot(Multi, features = paste0(names(marker_genes), "1"), 
+                    group.by = "seurat_clusters", pt.size = 0, ncol = 2) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave("ModuleScores_ViolinPlot.png", plot = vln_plot, width = 12, height = 6, dpi = 300)
+
+
 
 
