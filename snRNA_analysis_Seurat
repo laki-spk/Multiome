@@ -106,5 +106,23 @@ vln_plot <- VlnPlot(Multi, features = paste0(names(marker_genes), "1"),
 ggsave("ModuleScores_ViolinPlot.png", plot = vln_plot, width = 12, height = 6, dpi = 300)
 
 
+new.cluster.ids <- c("EC", "CM", "CM", "CM", "FB", "Macro", "CM", "CM", "Peri", "EC", "EC", "CM", "CM", "FB", "FB", "CM", "FB", "CM", "B_cells", "Macro", "Macro", "EC", "T", "Macro", "Peri", "CM", "EC", "Meso", "CM", "CM", "CM", "EC", "SMC", "FB", "CM")
+names(new.cluster.ids) <- levels(Multi)
+Multi <- RenameIdents(Multi, new.cluster.ids)
+DimPlot(Multi, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+
+DimPlot(Multi, reduction = "umap", group.by = "origin", label = TRUE, pt.size = 0.5)
+
+Multi$origin <- paste(Multi$orig.ident, Multi$sample, sep = "_")
 
 
+
+Multi@meta.data <- Multi@meta.data %>%
+  mutate(origin = recode(origin, 
+                         "D_1" = "D4",
+                         "D_2" = "D4",
+                         "D_3" = "D28",
+                         "D_4" = "D28",
+                         "L_1" = "A18",
+                         "L_2" = "A4T",
+                         "L_3" = "A24"))
