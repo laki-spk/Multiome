@@ -1,93 +1,64 @@
 library(dplyr)
 library(Seurat)
 library(patchwork)
-install.packages('BiocManager')
-BiocManager::install('limma')
-
 library(harmony)
-library(plyr)
-library(cowplot)
-library(readr)
-library(patchwork)
-library(Matrix)
-library(dplyr)
-library(tibble) 
-library(Seurat)
-library(clustree)
 library(ggplot2)
+library(Matrix)
+library(tibble)
+library(readr)
+library(cowplot)
+library(clustree)
 library(gridExtra)
-library(AUCell)
-require(data.table)
-library(multtest)
-library(metap)
 library(stringr)
 library(magrittr)
-library(HDF5Array)
-library(bigstatsr)
-library(hdf5r)
 
 # Load hdf5 files from CellRanger for both D and L datasets
 inputdata.D <- Read10X_h5("D:/Doa_Multiome/filtered_feature_bc_matrix.h5")
 inputdata.L <- Read10X_h5("D:/filtered_feature_bc_matrix.h5")
 
-# Extract RNA and ATAC data
+# Extract RNA data
 rna_counts.D <- inputdata.D$`Gene Expression`
-atac_counts.D <- inputdata.D$Peaks
 rna_counts.L <- inputdata.L$`Gene Expression`
-atac_counts.L <- inputdata.L$Peaks
 
-# Create Seurat objects for D and L
+# Create Seurat objects
 D <- CreateSeuratObject(counts = rna_counts.D)
 L <- CreateSeuratObject(counts = rna_counts.L)
 
-# Add mitochondrial percentage for both D and L
+# Add mitochondrial percentage
 D[["percent.mt"]] <- PercentageFeatureSet(D, pattern = "^mt-")
 L[["percent.mt"]] <- PercentageFeatureSet(L, pattern = "^mt-")
 
-# Visualize QC metrics for D
-VlnPlot(D, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
-plot1.D <- FeatureScatter(D, feature1 = "nCount_RNA", feature2 = "percent.mt")
-plot2.D <- FeatureScatter(D, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
-plot1.D + plot2.D
+# Perform QC filtering
 D <- subset(D, subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 5)
-
-# Visualize QC metrics for L
-VlnPlot(L, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
-plot1.L <- FeatureScatter(L, feature1 = "nCount_RNA", feature2 = "percent.mt")
-plot2.L <- FeatureScatter(L, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
-plot1.L + plot2.L
 L <- subset(L, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
 
-# RNA analysis for D using SCTransform
-D <- SCTransform(D, vars.to.regress = "percent.mt", verbose = FALSE)
+# Normalize and identify variable features for integration
+D <- NormalizeData(D)
+L <- NormalizeData(L)
+D <- FindVariableFeatures(D, selection.method = "vst", nfeatures = 3000)
+L <- FindVariableFeatures(L, selection.method = "vst", nfeatures = 3000)
 
-# RNA analysis for L using SCTransform
-L <- SCTransform(L, vars.to.regress = "percent.mt", verbose = FALSE)
-
-# Integrate D and L into a new object 'Multi'
-# First, run Harmony for batch effect correction
-library(harmony)
-
-# Run Harmony on the PCA embeddings to adjust for batch effects
-D <- RunPCA(D)
-L <- RunPCA(L)
-
-# Run Harmony using the "batch" parameter to account for dataset-specific variations (e.g., "Dataset")
-D <- RunHarmony(D, group.by.vars = "batch")
-L <- RunHarmony(L, group.by.vars = "batch")
-
-# Integrate D and L after Harmony correction
+# Identify integration anchors and integrate datasets
 anchors <- FindIntegrationAnchors(object.list = list(D, L), dims = 1:30)
 Multi <- IntegrateData(anchorset = anchors, dims = 1:30)
 
-# Re-run PCA for integrated object Multi, which now includes Harmony correction
-DefaultAssay(Multi) <- "RNA"
-Multi <- ScaleData(Multi)
+# Set the default assay and run SCTransform
+DefaultAssay(Multi) <- "integrated"
+Multi <- SCTransform(Multi, vars.to.regress = "percent.mt", verbose = FALSE)
+
+# Run PCA
 Multi <- RunPCA(Multi)
 
-# Find neighbors and clusters for Multi
-Multi <- FindNeighbors(Multi, reduction = "pca", dims = 1:30)
+# Run Harmony for batch correction
+Multi <- RunHarmony(Multi, group.by.vars = "batch")
+
+# Run neighbors, clusters, and UMAP
+Multi <- FindNeighbors(Multi, reduction = "harmony", dims = 1:30)
 Multi <- FindClusters(Multi, resolution = 1)
+Multi <- RunUMAP(Multi, reduction = "harmony", dims = 1:30)
+
+# Plot UMAP
+DimPlot(Multi, reduction = "umap", label = TRUE, repel = TRUE) + ggtitle("Integrated UMAP with Harmony")
 
 # Calculate WNN for Multi
 Multi <- FindMultiModalNeighbors(Multi, reduction.list = list("pca"), dims.list = list(1:50))
