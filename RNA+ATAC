@@ -1,0 +1,2096 @@
+##install dataset
+library(Seurat)
+library(Signac)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(cowplot)
+library(patchwork)
+library(AnnotationHub)
+
+## Load the annotation resource.
+ah <- AnnotationHub()
+## Query for available H.Sapiens EnsDb databases
+query(ah, pattern = c("Homo Sapiens", "EnsDb"))
+#load newest one
+data <- ah[["AH116860"]]
+
+
+###creat seurat object on aggreated data
+## load hdf5 file from cellranger which contains both RNA and ATAC data
+inputdata.10x <- Read10X_h5("./aggregated pu lab file/filtered_feature_bc_matrix.h5")
+
+
+# extract RNA and ATAC data
+rna_counts <- inputdata.10x$'Gene Expression'
+atac_counts <- inputdata.10x$'Peaks'
+
+
+# Create Seurat object
+Multi <- CreateSeuratObject(counts = rna_counts)
+
+
+# Now add in the ATAC-seq data
+# we'll only use peaks in standard chromosomes
+grange.counts <- StringToGRanges(rownames(atac_counts), sep = c(":", "-"))
+grange.use <- seqnames(grange.counts) %in% standardChromosomes(grange.counts)
+atac_counts <- atac_counts[as.vector(grange.use), ]
+annotations <- GetGRangesFromEnsDb(ensdb = data)
+seqlevels(annotations) <- paste0('chr', seqlevels(annotations))
+#seqlevelsStyle(annotations) <- 'UCSC'
+genome(annotations) <- "hg38"
+
+
+######## use tsv.gz create a new fragment and load to the existing seurat object. 
+fragments <- CreateFragmentObject(path = "./aggregated pu lab file/atac_fragments.tsv.gz", cells = colnames(Multi), validate.fragments = TRUE)
+
+chrom_assay <- CreateChromatinAssay(
+  counts = atac_counts,
+  sep = c(":", "-"),
+  genome = 'hg38',
+  fragments = fragments,
+  min.cells = 10,
+  annotation = annotations
+)
+Multi[["ATAC"]] <- chrom_assay
+
+## QC
+#Apply scrublet scores
+scrub <- read.csv('./aggregated pu lab file/scrublet_output_table.csv')
+Multi@meta.data$scrub_score <- scrub$doublet_score
+Multi@meta.data$Predicted_doublets <- ifelse(Multi@meta.data$scrub_score > 0.26, "Doublet","Singlet" ) 
+Valid.Cells <- rownames(Multi@meta.data[Multi@meta.data$Predicted_doublets == "Singlet",])
+Multi@meta.data$Cells.to.keep <- rownames(Multi@meta.data) %in% Valid.Cells
+Multi <- subset(Multi,  cells = Valid.Cells)
+
+DefaultAssay(Multi) <- "ATAC"
+Multi <- NucleosomeSignal(Multi)
+Multi <- TSSEnrichment(Multi)
+DensityScatter(Multi, x = 'nCount_ATAC', y = 'TSS.enrichment', log_x = TRUE, quantiles = TRUE)
+
+DefaultAssay(Multi) <- "RNA"
+mito.features <- grep(pattern = "^MT-", x = rownames(x = Multi), value = TRUE)
+percent.mito <- Matrix::colSums(x = GetAssayData(object = Multi, layer = 'counts')[mito.features, ]) / Matrix::colSums(x = GetAssayData(object = Multi, layer = 'counts'))
+Multi[['percent.mito']] <- percent.mito
+
+VlnPlot(Multi, features = c("nCount_ATAC", "nCount_RNA","percent.mito", "nucleosome_signal"), ncol = 2) + NoLegend()
+
+### data filtering
+Multi <- subset(
+  x = Multi,
+  subset = nCount_ATAC < 1e5 &
+    nCount_ATAC > 1e2 &
+    nCount_RNA < 15000 &
+    nCount_RNA > 300 &
+    percent.mito < 0.02 &
+    nucleosome_signal < 4 &
+    TSS.enrichment > 1
+)
+
+
+save(Multi, file = "./aggregated pu lab file/Multi pre processed.RData")
+
+#We next perform pre-processing and dimensional reduction on both assays independently, using standard approaches for RNA and ATAC-seq data.
+# RNA analysis
+DefaultAssay(Multi) <- "RNA"
+Multi <- SCTransform(Multi, verbose = FALSE) %>% RunPCA() %>% RunUMAP(dims = 1:50, reduction.name = 'umap.rna', reduction.key = 'rnaUMAP_')
+
+# ATAC analysis
+# We exclude the first dimension as this is typically correlated with sequencing depth
+DefaultAssay(Multi) <- "ATAC"
+Multi <- RunTFIDF(Multi)
+Multi <- FindTopFeatures(Multi, min.cutoff = 'q0')
+Multi <- RunSVD(Multi)
+Multi <- RunUMAP(Multi, reduction = 'lsi', dims = 1:50, reduction.name = "umap.atac", reduction.key = "atacUMAP_")
+### calculate WNN
+Multi <- FindMultiModalNeighbors(Multi, reduction.list = list("pca", "lsi"), dims.list = list(1:50, 2:50))
+Multi <- RunUMAP(Multi, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+Multi <- FindClusters(Multi, graph.name = "wsnn", algorithm = 3, verbose = FALSE)
+## plot clusters
+p1 <- DimPlot(Multi, reduction = "umap.rna", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("RNA")
+p2 <- DimPlot(Multi, reduction = "umap.atac", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("ATAC")
+p3 <- DimPlot(Multi, reduction = "wnn.umap", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("WNN")
+p1 + p2 + p3 & NoLegend() & theme(plot.title = element_text(hjust = 0.5))
+
+### separate samples of origin
+Multi$sample <- gsub("[^1-4]","",rownames(Multi@meta.data))
+
+### Plot samples separately
+p1 <- DimPlot(Multi, reduction = "umap.rna", label = TRUE, label.size = 2.5, repel = TRUE, group.by = "sample", label.box = T) + ggtitle("RNA")
+p2 <- DimPlot(Multi, reduction = "umap.atac", label = TRUE, label.size = 2.5, repel = TRUE, group.by = "sample",label.box = T) + ggtitle("ATAC")
+p3 <- DimPlot(Multi, reduction = "wnn.umap", label = TRUE, label.size = 2.5, repel = TRUE, group.by = "sample",label.box = T) + ggtitle("WNN")
+p1 + p2 + p3 & NoLegend() & theme(plot.title = element_text(hjust = 0.5))
+
+## ~~~~~~~~~~~~identify cell types ~~~~~~~~~~~~~~~~~
+DefaultAssay(Multi) <- "SCT"
+
+#(2 each of myo, endo, epi, immune, blood, fibro)
+FeaturePlot(Multi, features = c("MYL7", "TNNT2", "KDR", "CLDN5", "TBX18", "WT1", "PLEK", "TMSB4X", "HBB-BT", "GYPA", "DCN", "PDGFRA"), label=TRUE, reduction ="wnn.umap")
+
+#establish groups based on published markers
+#1
+EC.genes <- c("NPPA", "VWF", "PLVAP", "APLNR", "SOX17", "HEY1", "EMCN", "ECSCR", "CLDN5", "GJA5", "CDH5", "IGFBP3", "FLT1", "KDR", "TEK", "TJP1", "NOTCH1", "GJA4", "NPR3")
+TopMarkerGenes <- list(EC.genes)
+names(TopMarkerGenes) <- c("EC.genes")
+Multi <- AddModuleScore(Multi, features = TopMarkerGenes, assay="SCT", name = "EC", nbin = 22)
+
+#2
+Myo.genes <- c("TAGLN", "RYR2", "TNNI3", "TNNC1", "CRYAB", "MYL4", "ACTC1", "MYL7", "TNNT2", "ACTA2", "RRAD", "ANK3", "PRKAA2", "NKX2-5", "ALCAM", "GATA4", "VCAM1", "ERBB2", "KCNJ3", "IRX4")
+TopMarkerGenes <- list(Myo.genes)
+names(TopMarkerGenes) <- c("Myo.genes")
+Multi <- AddModuleScore(Multi, features = TopMarkerGenes, assay="SCT", name = "Myo", nbin = 22)
+
+#3
+Epi.genes <- c("ALDH1A2", "TBX18", "WT1", "TCF21", "SEMA3D", "SCX", "CDH1", "EPCAM", "C2", "KRT18", "GRHL2")
+TopMarkerGenes <- list(Epi.genes)
+names(TopMarkerGenes) <- c("Epi.genes")
+Multi <- AddModuleScore(Multi, features = TopMarkerGenes, assay="SCT", name = "Epi", nbin = 22)
+
+#4
+Immune.genes <- c("TMSB4X", "PLEK", "FCER1G", "CD4", "CD19", "CD14", "CD8")
+TopMarkerGenes <- list(Immune.genes)
+names(TopMarkerGenes) <- c("Immune.genes")
+Multi <- AddModuleScore(Multi, features = TopMarkerGenes, assay="SCT", name = "Immune", nbin = 22)
+
+#5
+Erythroid.genes <- c("HBB-BT", "GYPA", "GATA1", "STAT2", "FOG1", "KLF1", "TAL1", "JAK2")
+TopMarkerGenes <- list(Erythroid.genes)
+names(TopMarkerGenes) <- c("Erythroid.genes")
+Multi <- AddModuleScore(Multi, features = TopMarkerGenes, assay="SCT", name = "Erythroid", nbin = 22)
+
+#6
+Fib.genes <- c("DCN", "ABCA6", "BICC1", "NEGR1", "RORA", "BMPER", "PCDH9", "MFAP5", "KCNT2", "FBLN1", "FOXM1", "NOVA1", "LUM", "COL3A1", "COL1A1", "FN1", "COL1A2", "CDH2", "POSTN", "ACTA2", "VIM", "PDGFRA")
+TopMarkerGenes <- list(Fib.genes)
+names(TopMarkerGenes) <- c("Fib.genes")
+Multi <- AddModuleScore(Multi, features = TopMarkerGenes, assay="SCT", name = "Fib", nbin = 22)
+
+colnames(Multi@meta.data)[grep("EC1", colnames(Multi@meta.data))] <- "EC"
+colnames(Multi@meta.data)[grep("Myo1", colnames(Multi@meta.data))] <- "Myo"
+colnames(Multi@meta.data)[grep("Epi1", colnames(Multi@meta.data))] <- "Epi"
+colnames(Multi@meta.data)[grep("Immune1", colnames(Multi@meta.data))] <- "Immune"
+colnames(Multi@meta.data)[grep("Erythroid1", colnames(Multi@meta.data))] <- "Erythroid"
+colnames(Multi@meta.data)[grep("Fib1", colnames(Multi@meta.data))] <- "Fib"
+
+DotPlot(Multi, features = c("EC", "Myo", "Epi", "Immune", "Erythroid", "Fib"))
+FeaturePlot(Multi, features = c("EC", "Myo", "Epi", "Immune", "Erythroid", "Fib"),  label=TRUE, reduction ="wnn.umap")
+
+save(Multi, file = "./aggregated pu lab file/Multi clustered.RData")
+
+## ~~~~~~~~~~~~subset based on Myo markers~~~~~~~~~~~~~~~
+Myo_multi <- subset(Multi, subset = seurat_clusters == "0" | seurat_clusters == "2" | seurat_clusters == "4" | seurat_clusters == "5" | seurat_clusters == "10" | seurat_clusters == "12" | seurat_clusters == "15" | seurat_clusters == "17" | seurat_clusters == "18")
+
+p1 <- DimPlot(Myo_multi, reduction = "wnn.umap", group.by="sample", label=TRUE)
+p2 <- DimPlot(Myo_multi, reduction = "wnn.umap", label=TRUE)
+p1+ p2
+
+## ~~~~~~~~~~~~~~~Find Myo3 cluster~~~~~~~~~~~~~~~~~~~~~~~~
+TopMarkerGenes <- list(Myo3)
+names(TopMarkerGenes) <- c("Myo3")
+Myo_multi <- AddModuleScore(Myo_multi, features = TopMarkerGenes, assay="SCT", name = "Myo3", nbin=22)
+colnames(Myo_multi@meta.data)[grep("Myo31", colnames(Myo_multi@meta.data))] <- "Myo3"
+
+PSM.genes <- c("PSMB5", "PSMA7", "PSMB6","PSMB1", "PSMA2", "PSMB7", "PSMC3", "PSMA6", "PSMB2", "PSME1", "PSMD2", "PSMD8", "PSMB3","PSMB4", "PSMA4", "PSMA3", "PSME4")
+TopMarkerGenes <- list(PSM.genes)
+names(TopMarkerGenes) <- c("PSM.genes")
+Myo_multi <- AddModuleScore(Myo_multi, features = TopMarkerGenes, assay="SCT", name = "PSM", nbin=22)
+colnames(Myo_multi@meta.data)[grep("PSM1", colnames(Myo_multi@meta.data))] <- "PSM"
+
+DotPlot(Myo_multi, features = c("PSM", "Myo3"))
+FeaturePlot(Myo_multi, features = c("PSM", "Myo3"), label=TRUE, reduction ="wnn.umap")
+
+
+##~~~~~~~~~addmodulescore for CM4 and nonCM4~~~~~~~~~~~~~~
+CM4.genes <- c("Mdh2","Chchd10","Gm11273","Aldoa","Cox5a","Atp5j","Gm10250","Cfap46","Fabp3ps1","Ckm","Gm10053","Cox5b","Tnni1","Uqcrb","Atp5b","Ndufb9","Uqcr11","Atp5g3","Dbi","Cox6b1","Rabgef1","Des","Cryab","Mb","Ndufb11","Ndufa5","Cox7a2","Cox7c","Uqcr10","Atp5h","Ndufb7","Ndufs6","Cox8a","Cycs","Ndufb8","Atp5d","Pgam2","Uqcrfs1","Atp5j2","mt-Nd4l","Ndufa4","Tpi1","Fcrla","Cox8b","2010107E04Rik","Atp5o","mt-Nd5","Cox6a2","Atp5a1","Ndufs2","Uqcrq","Atp5g1","Acadl","Acaa2","Uqcrh","Hspb1","Ndufa1","Gm11808","Cox6c","Ndufa8","mt-Nd3","Cox6a1","Ndufa2","Ndufv3","Atp5f1","Atp5l","Sod2","Atp5e","Atp5c1","Slc25a5","Atp5g2","Hsp90ab1","Ldhb","Ndufv1","Acadvl","Gm26694","Ndufa11","Ndufa12","Hspa8","Ndufc2","Ppia","Ndufa6","Idh2","Ndufb10","S100a1","Fabp3","mt-Nd2","Hint1","Mdh1","Prdx2","Fth1","Ubb","Eef1a1","Vdac1","Ndufb5","Myl3","Nppa","Rpl27ps3","Ech1","Ndufb6","Mgst3","Nlrc4","Wdr89","Ldha","Ndufa9","Minos1","Mif","Uqcrc2","Tuba1b","Gm2000","Ndufc1","Csrp3","Hspb7","Ndufs7","Ndufa7","Slc25a4","Map1lc3a","Smdt1","Gm10073","Acta2","Hcfc1r1","Car1","Cyc1","Eno3","Sdhb","Hadhb","Eif1","Gpx4","Rplp1","Fh1","Rpl19","Rps8","Tubb5","Slc25a3","Pdha1","Prdx5","Prdx1","Rps29","Rpl14","Myl12a","Ndufv2","Eef2","Rpl9ps6","Shfm1","Actc1","Rps3","Hspd1","Gm10036","Atpif1","Rpl32","Rps25","Rps18ps3","Sdhd","2410015M20Rik","Gm9843","H3f3a","Rpl18","Rps4x","Myl9","Tpt1","Rpl8","Rps14","Mt1","Higd2a","Uqcrc1","Cox7b","Rpl23aps3","Suclg1","Rps9","Rpl36al","Ak1","Pkm","Cisd1","Rpl6l","Gm8730","Hspe1","Rplp0","Yjefn3","Aco2","Gm10260","mt-Nd4","Rps16","Ndufb3","Fbxl22","Spag6l","Rps15","Adsl","Slc16a2","Tceb2","Rpl4","Serf2","Ndufa10","Crip2","Rps23","Acadm","Ddah1","Gm9493","Taf1c","Gpi1","Rpl36ps3","Oaz1","Gng5","Rps24","Eif4ebp1","Rpl7","Hspa9","Rps27a","Rpl27a","Cox14","Gm8797","Smpx","Pnpla7","Mrpl12","Rps5","1110001J03Rik","Nop10","Romo1","Traf5","mt-Co2","Rpl41","Sdha","Gclm","Rps27rt","Rps6","Pfn1","Idh3a","Prkar1a","Sumf1","Cox7a2l","Rpl13ps3","Dynll1","Pdhb","Vdac2","Tnni3","Reep5","Mrpl33","Pebp1","Rpl17","Rpl39","Rps19","Eif5a","Heph","Psmb5","Rpsa","Ghitm","Got2","Nedd8","Park7","mt-Cytb","Bsg","Fabp4","Rpl11","Rpl24","Psma7","Anapc13","Ndufs3","Fyb","Ndufa3","Timm8b","Rpl35a","Eci1","Tecpr2","Atp6v1g1","Edf1","Ndufs5","Hn1","Tuba1a","Cnot6","C1qbp","Idh3g","Kcne1","Tmsb4x","Myl2","Tpm1","Mpc2","Tmsb10","Tomm7","mt-Co1","Psmb6","Sh3bgr","Mrfap1","Mrpl51","Gnas","Rps3a1","Perp","1700016D06Rik","Ppp1ca","Vdac3","Rps26ps1","Mrpl42","Gm4950","Lgals1","mt-Nd1","Tma7","Snrpd2","Apobec2","Myeov2","Acot13","Hmgb1","Rpl18a","Tubb4b","Calm3")
+CM4.mtx <- as.matrix(CM4.genes)
+rownames(CM4.mtx) <- CM4.mtx[,1]
+CM4.mtx <- cbind(CM4.mtx,Class='NA');
+
+gene_df <- orthogene::convert_orthologs(gene_df = CM4.mtx,
+                                        gene_input = "rownames", 
+                                        gene_output = "rownames", 
+                                        input_species = "mouse",
+                                        output_species = "human",
+                                        non121_strategy="drop_both_species",
+                                        method = "gprofiler") 
+CM4.hum.genes <- rownames(gene_df)
+TopMarkerGenes <- list(CM4.hum.genes)
+names(TopMarkerGenes) <- c("CM4.hum.genes")
+Myo_multi <- AddModuleScore(Myo_multi, features = TopMarkerGenes, assay="SCT", name = "CM4", nbin=22)
+colnames(Myo_multi@meta.data)[grep("CM41", colnames(Myo_multi@meta.data))] <- "CM4"
+
+nonCM4.genes <- c("Itpr1","Son","Nlk","Rapgef6","Vps13d","Nfyc","Rbm25","Smg1","Tead1","Pitpnc1","Cog5","Arl15","Erc1","Gbf1","Vegfa","Garem","Tbc1d5","Ash1l","Rbm26","Nktr","Meis1","Mbnl2","Arhgap26","Kdm5c","Rcan2","Dtna","Setbp1","Pan3","Smtn","Mbd5","Zfp638","Ldlrad4","Zeb2","Macf1","Ttc14","Sorbs2os","Phldb2","Ambra1","Rapgef2","Pde7b","Ppm1e","Lnpep","Lhfp","Fmn1","Jmjd1c","Ggnbp1","Chchd3","Gm26699","Nipbl","Lrch1","Tbc1d4","Adk","Rasal2","Gab2","Nsd1","Bbs9","Adamts6","4930402H24Rik","Trpm7","Gm12295","Fbxl17","Mical3","Scmh1","Malat1","Vps13a","Rbms3","Magi2","Gm26916","Nr6a1","Limch1","Fbn2","Nfib","Sltm","Smg6","Ptprk","Ccnl2","Wwox","Ube2e2","Sik3","Sbf2","Rbm6","Ppargc1b","Baz2b","Sorbs2","Cpq","Dennd1a","Pard3","9130011E15Rik","Pde4dip","Ralgapa1","Gm20732","Ccdc141","Map4","Pde3a","Phactr2","Myh7b","Ralgapa2","Shroom3","Msrb3","Ogt","Ablim1","Astn2","Pde1c","Mitf","Gata4","Mast2","Mllt10","Zcchc7","Lrrfip1","Samd4","Qk","Rnf207","Gpcpd1","Rbfox1","Tcf12","Rbpms","Rabgap1l","Asap1","Ubn2","Nrp1","Diaph2","Rora","Trim55","Park2","Lpp","Meis2","Exoc4","2010111I01Rik","Nfat5","Akap13","Ptprd","Filip1","Strbp","Cacna2d1","Ppp1r12a","Gphn","Cdh13","Msi2","Arhgap6","Crkl","Fry","Kcnq1","Rmdn1","Gm30382","Ccnt2","Atxn1","Fhod3","Mid1","Pip5k1b","Kcnn2","Prickle1","Kcnq1ot1","Pard3b","Nfia","Rere","Cep85l","Ext1","Ppp1r12b","Sntb1","Gm21092","Rbms1","Gm26848","Pdzd2","Akap6","Mlip","Filip1l","Rbm39","Hmcn1","Tmcc1","Chrm2","Pdzrn3","Luc7l2","Ror1","Cmss1","Large","Sorbs1","Kansl1","Ank3","Sgcd","Prkca","Cpeb3","Pbx1","Tnni3k","Camk2d","Kcnd2","Ehbp1","Sox6","Efna5","Stam2","Rsrp1","4930512H18Rik","Nav2","Dlc1","Mhrt","Magi1","Dip2c","Mast4","Lama2","Magi3","Ptprm","Erbb4","Rbm20","Prkg1","Myocd","Celf2","Ghr","Pcdh7","Esrrg","Cacna1c","Ankrd6","Dmd","Auts2","Zfpm2","Neat1","Slc8a1","Pde4b","Fgf13","Palld","Ptprg","Ank2","Airn","Cacnb2","Ctnna3","Xist","Lrrtm3")
+gene_df_non <- orthogene::convert_orthologs(gene_df = nonCM4.genes,
+                                            gene_input = "rownames", 
+                                            gene_output = "rownames", 
+                                            input_species = "mouse",
+                                            output_species = "human",
+                                            non121_strategy="drop_both_species",
+                                            method = "gprofiler") 
+nonCM4.hum.genes <- rownames(gene_df_non)
+TopMarkerGenes <- list(nonCM4.hum.genes)
+names(TopMarkerGenes) <- c("nonCM4.hum.genes")
+Myo_multi <- AddModuleScore(Myo_multi, features = TopMarkerGenes, assay="SCT", name = "nonCM4", nbin=22)
+colnames(Myo_multi@meta.data)[grep("nonCM41", colnames(Myo_multi@meta.data))] <- "nonCM4"
+
+DotPlot(Myo_multi, features = c("CM4", "nonCM4", "PSM", "Myo3"))
+
+save(Myo_multi, file = "Myo_multiomic_subcluster_Pu_lab.Rdata")
+
+## gene expression data processing
+Myo_multi <- RunPCA(Myo_multi, assay="SCT")
+Myo_multi <- RunUMAP(Myo_multi, dims = 1:50, reduction.name = 'umap.rna', reduction.key = 'rnaUMAP_')
+
+## dna accessibility data processing
+DefaultAssay(Myo_multi) <- "ATAC"
+Myo_multi <- RunSVD(Myo_multi)
+Myo_multi <- RunUMAP(Myo_multi, reduction = 'lsi', dims = 1:50, reduction.name = "umap.atac", reduction.key = "atacUMAP_")
+
+#run harmony
+Myo_multi <- Myo_multi %>% 
+  RunHarmony(c("sample"),
+             assay.use = "RNA",
+             reduction.save = "harmony.rna", 
+             plot_convergence = TRUE)
+
+Myo_multi <- Myo_multi %>% 
+  RunHarmony(c("sample"), 
+             assay.use = "ATAC", 
+             reduction.save = "harmony.atac", 
+             plot_convergence = TRUE)
+
+## ~~~~~~joint UMAP visualization~~~~~~~~~~~~~~~
+# build a joint neighbor graph using both assays
+Myo_multi <- FindMultiModalNeighbors(object = Myo_multi, reduction.list = list("harmony.rna", "harmony.atac"), dims.list = list(1:50, 2:40))
+Myo_multi <- RunUMAP(Myo_multi, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+Myo_multi <- FindClusters(Myo_multi, graph.name = "wsnn", algorithm = 3, resolution = 0.1)
+
+# plot clusters
+p1 <- DimPlot(Myo_multi, reduction = "umap.rna", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("RNA")
+p2 <- DimPlot(Myo_multi, reduction = "umap.atac", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("ATAC")
+p3 <- DimPlot(Myo_multi, reduction = "wnn.umap", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("WNN")
+p1 + p2 + p3 & NoLegend() & theme(plot.title = element_text(hjust = 0.5))
+
+# Plot samples separately
+p1 <- DimPlot(Myo_multi, reduction = "umap.rna", label = TRUE, label.size = 2.5, repel = TRUE, group.by = "sample", label.box = T) + ggtitle("RNA")
+p2 <- DimPlot(Myo_multi, reduction = "umap.atac", label = TRUE, label.size = 2.5, repel = TRUE, group.by = "sample",label.box = T) + ggtitle("ATAC")
+p3 <- DimPlot(Myo_multi, reduction = "wnn.umap", label = TRUE, label.size = 2.5, repel = TRUE, group.by = "sample",label.box = T) + ggtitle("WNN")
+p1 + p2 + p3 & NoLegend() & theme(plot.title = element_text(hjust = 0.5))
+
+FeaturePlot(Myo_multi, reduction="wnn.umap", features = c("CM4", "nonCM4", "PSM", "Myo3"), label=TRUE)
+DotPlot(Myo_multi, features = c("CM4", "nonCM4", "PSM", "Myo3"))
+
+save(Myo_multi, file = "Myo_multiomic_subcluster_harmony_Pu_lab.Rdata")
+
+### ~~~~~~~~~try to transfer anchors from previous Myo object~~~~~~~~~~~~~~~~~~~~~~~
+Myo_SCT <- SCTransform(Myo)
+DefaultAssay(Myo_SCT) <- "SCT"
+DefaultAssay(Myo_multi) <- "SCT"
+transfer_anchors <- FindTransferAnchors(
+  reference = Myo_SCT,
+  query = Myo_multi,
+  normalization.method = "SCT",
+  reference.reduction = "pca",
+  recompute.residuals = FALSE,
+  dims = 1:50
+)
+
+predictions <- TransferData(
+  anchorset = transfer_anchors, 
+  refdata = Myo_SCT$seurat_clusters,
+  weight.reduction = Myo_multi[['pca']],
+  dims = 1:50
+)
+
+Myo_multi <- AddMetaData(
+  object = Myo_multi,
+  metadata = predictions
+)
+
+# graph predictions
+p1 <- DimPlot(Myo_multi, label=TRUE, reduction="wnn.umap", group.by="seurat_clusters")
+p2 <- DimPlot(Myo_multi, label=TRUE, reduction="wnn.umap", group.by="predicted.id")
+p3 <- DimPlot(Myo_multi, label=TRUE, reduction="wnn.umap", group.by="sample")
+p1 + p2 + p3
+
+#find proportions
+Idents(Myo_multi) <- "predicted.id"
+Idents(Myo_multi) <- "ident"
+tableRes2prop<-prop.table(table(Idents(Myo_multi), Myo_multi@meta.data$sample),2)
+print(tableRes2prop)
+
+
+### assign cell cycle scores
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+Myo_multi <- CellCycleScoring(Myo_multi, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+table(Myo_multi$sample, Myo_multi$Phase)
+DimPlot(Myo_multi, reduction = "wnn.umap", group.by = "Phase", label.size = 2.5, repel = TRUE)
+
+Idents(Myo_multi) <- "seurat_clusters"
+Myo_multi_markers <- FindAllMarkers(Myo_multi, only.pos = TRUE)
+Myo_multi_markers <- subset(Myo_multi_markers, subset = p_val_adj < 0.05)
+top_markers <- Myo_multi_markers %>%
+  group_by(cluster) %>%
+  slice_max(order_by = avg_log2FC, n = 10)
+DoHeatmap(Myo_multi, features = top_markers$gene, slot ="counts")
+
+save(Myo_multi, file = "Myo_multiomic_subcluster_harmony_Pu_lab.Rdata")
+
+# assign cell types
+Myo_multi@meta.data$ident[Myo_multi@meta.data$seurat_clusters == "5"] <- "CM4 like"
+Myo_multi@meta.data$ident[Myo_multi@meta.data$seurat_clusters == "1"] <- "CM4 like"
+Myo_multi@meta.data$ident[Myo_multi@meta.data$seurat_clusters == "0"] <- "not CM4 like"
+Myo_multi@meta.data$ident[Myo_multi@meta.data$seurat_clusters == "2"] <- "CM4 like"
+Myo_multi@meta.data$ident[Myo_multi@meta.data$seurat_clusters == "3"] <- "not CM4 like"
+Myo_multi@meta.data$ident[Myo_multi@meta.data$seurat_clusters == "4"] <- "not CM4 like"
+Myo_multi@meta.data$ident[Myo_multi@meta.data$seurat_clusters == "6"] <- "not CM4 like"
+
+Myo_multi@meta.data$predicted[Myo_multi@meta.data$predicted.id == "0"] <- "not Myo3 like"
+Myo_multi@meta.data$predicted[Myo_multi@meta.data$predicted.id == "1"] <- "not Myo3 like"
+Myo_multi@meta.data$predicted[Myo_multi@meta.data$predicted.id == "2"] <- "not Myo3 like"
+Myo_multi@meta.data$predicted[Myo_multi@meta.data$predicted.id == "3"] <- "Myo3 like"
+
+
+Myo_multi@meta.data$split[Myo_multi@meta.data$seurat_clusters == "5"] <- "Cluster 5"
+Myo_multi@meta.data$split[Myo_multi@meta.data$predicted == "Myo3 like"] <- "Myo3 like"
+Myo_multi@meta.data$split[Myo_multi@meta.data$predicted != "Myo3 like" & Myo_multi@meta.data$seurat_clusters !="5"] <- "neither"
+
+Idents(Myo_multi) <- "split"
+# FindMarkers using celltype and cluster as two separate factors
+cluster5_vs_myo3_like_ATAC <- FindMarkers(Myo_multi, 
+                       ident.1 = "Myo3 like",
+                       ident.2 = "Cluster 5", assay="ATAC")
+cluster5_vs_myo3_like_RNA <- FindMarkers(Myo_multi, 
+                                          ident.1 = "Myo3 like",
+                                          ident.2 = "Cluster 5", assay="SCT")
+cluster5_vs_myo3_like_ATAC <- subset(cluster5_vs_myo3_like_ATAC, subset = p_val_adj < 0.05)
+cluster5_vs_myo3_like_RNA <- subset(cluster5_vs_myo3_like_RNA, subset = p_val_adj < 0.05)
+
+cluster5_vs_nonmyo3_like_RNA <- FindMarkers(Myo_multi, 
+                                         ident.1 = "Cluster 5",
+                                         ident.2 = "neither", assay="SCT")
+cluster5_vs_nonmyo3_like_RNA <- subset(cluster5_vs_nonmyo3_like_RNA, subset = p_val_adj < 0.05)
+split_groups_RNA <- FindAllMarkers(Myo_multi, assay="SCT", only.pos=TRUE)
+split_groups_RNA <- subset(split_groups_RNA, subset = p_val_adj < 0.05)
+
+
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~Link peaks to genes~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+DefaultAssay(Myo_multi) <- "ATAC"
+
+# first compute the GC content for each peak
+Myo_multi <- RegionStats(Myo_multi, genome = BSgenome.Hsapiens.UCSC.hg38)
+
+# link peaks to genes
+Myo_multi <- LinkPeaks(
+  object = Myo_multi,
+  peak.assay = "ATAC",
+  expression.assay = "SCT",
+)
+
+
+Idents(Myo_multi) <- "ident"
+Idents(Myo_multi) <- "predicted"
+Idents(Myo_multi) <- "seurat_clusters"
+Myo_multi <- SortIdents(Myo_multi)
+
+p1 <- CoveragePlot(
+  object = Myo_multi,
+  region = "ACTA2",
+  features = "ACTA2",
+  expression.assay = "SCT",
+  extend.upstream = 200000,
+  extend.downstream = 200000
+)
+
+p2 <- CoveragePlot(
+  object = Myo_multi,
+  region = "NPPA",
+  features = "NPPA",
+  expression.assay = "SCT",
+  extend.upstream = 60000,
+  extend.downstream = 60000
+)
+
+patchwork::wrap_plots(p1, p2, ncol = 1)
+
+### ~~~~~~~~~find differential ATAC peaks between Myo3_like clusters and others~~~~~~~~~~~
+
+Idents(Myo_multi) <- "ident"
+Idents(Myo_multi) <- "predicted"
+DefaultAssay(Myo_multi) <- 'ATAC'
+CM4_like_markers <- FindMarkers(Myo_multi, ident.1 = "CM4 like", ident.2 = "not CM4 like", verbose = TRUE)
+Myo3_like_markers <- FindMarkers(Myo_multi, ident.1 = "Myo3 like", ident.2 = "not Myo3 like", verbose = TRUE)
+
+# Annotate peaks with gene information
+CM4_like_annotations <- ClosestFeature(Myo_multi, regions = rownames(CM4_like_markers))
+Myo3_like_annotations <- ClosestFeature(Myo_multi, regions = rownames(Myo3_like_markers))
+CM4_like_markers$regions <- rownames(CM4_like_markers)
+Myo3_like_markers$regions <- rownames(Myo3_like_markers)
+
+# Assuming the peak coordinates are in 'peak' in both data frames
+CM4_like_diff_peaks_merged <- merge(CM4_like_markers, CM4_like_annotations, by.x = "regions", by.y = "query_region", all.x = TRUE)
+Myo3_like_diff_peaks_merged <- merge(Myo3_like_markers, Myo3_like_annotations, by.x = "regions", by.y = "query_region", all.x = TRUE)
+
+CM4_like_diff_peaks_merged <- subset(CM4_like_diff_peaks_merged, subset = p_val_adj < 0.05)
+Myo3_like_diff_peaks_merged <- subset(Myo3_like_diff_peaks_merged, subset = p_val_adj < 0.05)
+
+
+write.csv(CM4_like_diff_peaks_merged, file = "CM4_like_diff_peaks_versus_notCM4.csv")
+write.csv(Myo3_like_diff_peaks_merged, file = "Myo3_like_diff_peaks_versus_not3.csv")
+
+save(Myo_multi, file = "Myo_multiomic_subcluster_harmony_Pu_lab.Rdata")
+
+###~~~~~~~~~~~~find differential RNA between Myo3_like clusters and others~~~~~~~~~~~~~~~~
+DefaultAssay(Myo_multi) <- 'SCT'
+Idents(Myo_multi) <- "ident"
+Idents(Myo_multi) <- "predicted"
+Myo_multi <- PrepSCTFindMarkers(Myo_multi)
+CM4_like.markers <- FindMarkers(Myo_multi, ident.1 = "CM4 like", ident.2 = "not CM4 like", verbose = TRUE)
+CM4_like.markers <- subset(CM4_like.markers, subset = p_val_adj < 0.05)
+Myo3_like.markers <- FindMarkers(Myo_multi, ident.1 = "Myo3 like", ident.2 = "not Myo3 like", verbose = TRUE)
+Myo3_like.markers <- subset(Myo3_like.markers, subset = p_val_adj < 0.05)
+
+write.csv(CM4_like.markers, file = "Myo multi DEG CM4_like vs notCM4_like.csv")
+write.csv(Myo3_like.markers, file = "Myo multi DEG Myo3_like vs notMyo3_like.csv")
+
+# Add motifs to the Seurat object
+DefaultAssay(Myo_multi) <- 'ATAC'
+pfm <- getMatrixSet(x = JASPAR2020, opts = list(species = "Homo sapiens", all_versions = FALSE))
+Myo_multi <- AddMotifs(Myo_multi, genome = BSgenome.Hsapiens.UCSC.hg38, pfm = pfm)
+
+
+# get top differentially enriched motifs
+CM4_like_higher_markers <- subset(CM4_like_markers, subset = avg_log2FC > 0)
+Myo3_like_higher_markers <- subset(Myo3_like_markers, subset = avg_log2FC > 0)
+
+CM4_like_enriched.motifs <- FindMotifs(
+  object = Myo_multi,
+  features = rownames(CM4_like_higher_markers)
+)
+Myo3_like_enriched.motifs <- FindMotifs(
+  object = Myo_multi,
+  features = rownames(Myo3_like_higher_markers)
+)
+
+write.csv(CM4_like_enriched.motifs, file = "enriched motifs between CM4_like clusters and others_ident version.csv")
+write.csv(Myo3_like_enriched.motifs, file = "enriched motifs between Myo3_like clusters and others_predicted version.csv")
+
+MotifPlot(
+  object = Myo_multi,
+  motifs = head(rownames(CM4_like_enriched.motifs))
+)
+
+MotifPlot(
+  object = Myo_multi,
+  motifs = head(rownames(Myo3_like_enriched.motifs))
+)
+
+save(Myo_multi, file = "Myo_multiomic_subcluster_harmony_Pu_lab.Rdata")
+
+
+
+### find ATAC peaks that overlap with DEG regions
+# Extract ATAC peaks
+atac_peaks <- Myo_multi@assays$ATAC@ranges
+
+library(EnsDb.Hsapiens.v86)
+
+# Create an EnsDb object to get gene annotations
+edb <- EnsDb.Hsapiens.v86
+
+# Get gene annotations (e.g., gene locations)
+genes <- genes(edb)
+
+# Assuming you have a vector of DEGs from the RNA analysis
+#degs <- rownames(Myo3_like.markers)[Myo3_like.markers$p_val_adj < 0.05 & Myo3_like.markers$avg_log2FC > 1]
+degs <- toupper(conserved_genes)
+
+nonCM4.genes <- c("Itpr1","Son","Nlk","Rapgef6","Vps13d","Nfyc","Rbm25","Smg1","Tead1","Pitpnc1","Cog5","Arl15","Erc1","Gbf1","Vegfa","Garem","Tbc1d5","Ash1l","Rbm26","Nktr","Meis1","Mbnl2","Arhgap26","Kdm5c","Rcan2","Dtna","Setbp1","Pan3","Smtn","Mbd5","Zfp638","Ldlrad4","Zeb2","Macf1","Ttc14","Sorbs2os","Phldb2","Ambra1","Rapgef2","Pde7b","Ppm1e","Lnpep","Lhfp","Fmn1","Jmjd1c","Ggnbp1","Chchd3","Gm26699","Nipbl","Lrch1","Tbc1d4","Adk","Rasal2","Gab2","Nsd1","Bbs9","Adamts6","4930402H24Rik","Trpm7","Gm12295","Fbxl17","Mical3","Scmh1","Malat1","Vps13a","Rbms3","Magi2","Gm26916","Nr6a1","Limch1","Fbn2","Nfib","Sltm","Smg6","Ptprk","Ccnl2","Wwox","Ube2e2","Sik3","Sbf2","Rbm6","Ppargc1b","Baz2b","Sorbs2","Cpq","Dennd1a","Pard3","9130011E15Rik","Pde4dip","Ralgapa1","Gm20732","Ccdc141","Map4","Pde3a","Phactr2","Myh7b","Ralgapa2","Shroom3","Msrb3","Ogt","Ablim1","Astn2","Pde1c","Mitf","Gata4","Mast2","Mllt10","Zcchc7","Lrrfip1","Samd4","Qk","Rnf207","Gpcpd1","Rbfox1","Tcf12","Rbpms","Rabgap1l","Asap1","Ubn2","Nrp1","Diaph2","Rora","Trim55","Park2","Lpp","Meis2","Exoc4","2010111I01Rik","Nfat5","Akap13","Ptprd","Filip1","Strbp","Cacna2d1","Ppp1r12a","Gphn","Cdh13","Msi2","Arhgap6","Crkl","Fry","Kcnq1","Rmdn1","Gm30382","Ccnt2","Atxn1","Fhod3","Mid1","Pip5k1b","Kcnn2","Prickle1","Kcnq1ot1","Pard3b","Nfia","Rere","Cep85l","Ext1","Ppp1r12b","Sntb1","Gm21092","Rbms1","Gm26848","Pdzd2","Akap6","Mlip","Filip1l","Rbm39","Hmcn1","Tmcc1","Chrm2","Pdzrn3","Luc7l2","Ror1","Cmss1","Large","Sorbs1","Kansl1","Ank3","Sgcd","Prkca","Cpeb3","Pbx1","Tnni3k","Camk2d","Kcnd2","Ehbp1","Sox6","Efna5","Stam2","Rsrp1","4930512H18Rik","Nav2","Dlc1","Mhrt","Magi1","Dip2c","Mast4","Lama2","Magi3","Ptprm","Erbb4","Rbm20","Prkg1","Myocd","Celf2","Ghr","Pcdh7","Esrrg","Cacna1c","Ankrd6","Dmd","Auts2","Zfpm2","Neat1","Slc8a1","Pde4b","Fgf13","Palld","Ptprg","Ank2","Airn","Cacnb2","Ctnna3","Xist","Lrrtm3")
+nondegs <- toupper(nonCM4.genes)
+
+
+# Annotate DEGs (from RNA) using the gene locations
+degs_genes <- genes[genes$gene_name %in% degs]
+seqlevels(degs_genes) <- paste0("chr", seqlevels(degs_genes))
+
+
+nondegs_genes <- genes[genes$gene_name %in% nondegs]
+seqlevels(nondegs_genes) <- paste0("chr", seqlevels(nondegs_genes))
+
+# Find overlaps between ATAC peaks and DEGs within a specified distance (e.g., 10 kb)
+peaks_near_degs <- findOverlaps(atac_peaks, degs_genes, maxgap = 10000)  # 10kb window
+
+peaks_near_nondegs <- findOverlaps(atac_peaks, nondegs_genes, maxgap = 10000)  # 10kb window
+
+# Extract the overlapping ATAC peaks
+overlapping_peaks <- atac_peaks[queryHits(peaks_near_degs)]
+
+overlapping_peaks_non <- atac_peaks[queryHits(peaks_near_nondegs)]
+
+# View the overlapping peaks
+head(overlapping_peaks)
+
+### find enriched motifs for overlapping ATAC peaks of DEGs
+# Get the DNA sequences of the peaks
+peak_sequences <- getSeq(BSgenome.Hsapiens.UCSC.hg38, overlapping_peaks)
+
+peak_sequences_non <- getSeq(BSgenome.Hsapiens.UCSC.hg38, overlapping_peaks_non)
+
+# make overlapping_peaks back into normal location name list
+chromosomes <- seqnames(overlapping_peaks)
+start_positions <- start(overlapping_peaks)
+end_positions <- end(overlapping_peaks)
+
+chromosomes_non <- seqnames(overlapping_peaks_non)
+start_positions_non <- start(overlapping_peaks_non)
+end_positions_non <- end(overlapping_peaks_non)
+
+# Combine into a single string: "Chromosome-Start-End"
+overlapping_peak_names <- paste0(as.character(chromosomes), "-", start_positions, "-", end_positions)
+
+overlapping_peak_names_non <- paste0(as.character(chromosomes_non), "-", start_positions_non, "-", end_positions_non)
+
+#find enriched motifs in this list
+overlapping_peaks_enriched.motifs <- FindMotifs(
+  object = Myo_multi,
+  features = overlapping_peak_names,
+  background = 800
+)
+
+MotifPlot(Myo_multi, motifs = head(rownames(overlapping_peaks_enriched.motifs)))
+
+overlapping_peaks_enriched.motifs <- subset(overlapping_peaks_enriched.motifs, subset = p.adjust < 0.05)
+view(overlapping_peaks_enriched.motifs)
+write.csv(overlapping_peaks_enriched.motifs, file = "enriched motifs in CM4 DEG with 800 bg.csv")
+
+overlapping_peaks_bg_enriched.motifs <- FindMotifs(
+  object = Myo_multi,
+  features = overlapping_peak_names,
+  background = overlapping_peak_names_non
+)
+
+MotifPlot(Myo_multi, motifs = head(rownames(overlapping_peaks_bg_enriched.motifs)))
+
+overlapping_peaks_bg_enriched.motifs <- subset(overlapping_peaks_bg_enriched.motifs, subset = p.adjust < 0.05)
+view(overlapping_peaks_bg_enriched.motifs)
+write.csv(overlapping_peaks_bg_enriched.motifs, file = "enriched motifs in CM4 DEG with nonCM4 bg.csv")
+
+
+## ~~~~~~~~~are these enriched?~~~~~~~~~~~
+
+RNAseq <- read_excel("1_All_norm_TPM_CM_nuc.xlsx")
+
+# Convert the row names to uppercase
+RNAseq$il12 <- toupper(RNAseq$il12)
+RNAseq <- RNAseq %>% distinct(il12, .keep_all = TRUE)
+
+# Set gene names as row names
+RNAseq <- RNAseq %>%
+  column_to_rownames(var = "il12")
+
+# Remove the 'Gene Name' column now that it's set as row names
+RNAseq <- RNAseq[, -1]
+
+# List of specific genes you want to graph
+specific_genes <- overlapping_peaks_enriched.motifs$motif.name  # Replace with your genes
+
+# Subset the data for these specific genes
+TF <- RNAseq[specific_genes, ]
+
+clean_TF <- TF[complete.cases(TF), ]
+
+# Identify columns that contain "CM" in the column name
+cm_columns <- grep("CM", colnames(clean_TF))
+
+# Remove rows that have 0 in any of the "CM" columns
+df_clean <- clean_TF[!apply(clean_TF[, cm_columns] == 0, 1, any), ]
+
+
+
+library(pheatmap)
+
+# Assuming `subset_data` contains your expression data for specific genes
+pheatmap(df_clean, 
+         cluster_rows = TRUE,  # Cluster genes (optional)
+         cluster_cols = TRUE,  # Cluster cell types (optional)
+         color = colorRampPalette(c("white", "blue"))(100),  # Color gradient from white to blue
+         main = "Gene Expression Heatmap",
+         show_rownames = TRUE,  # Show gene names
+         show_colnames = TRUE)  # Show cell types
+
+############# get proportion of where peaks are located #############################################################
+# Load transcript database (TxDb) for human genome hg38
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+
+# Extract the TSS regions: promoter regions +/- 1kb around the TSS
+tss_granges <- promoters(genes(txdb), upstream = 1000, downstream = 1000)
+
+# Extract gene bodies (start and end of each gene)
+gene_granges <- genes(txdb)
+
+# Extract exons and UTRs
+exon_granges <- exons(txdb)
+utr_3_granges <- threeUTRsByTranscript(txdb)
+utr_5_granges <- fiveUTRsByTranscript(txdb)
+
+# Example: Download enhancer annotations from AnnotationHub
+ah <- AnnotationHub()
+enhancers <- query(ah, "enhancer")  # Query for enhancer data
+enhancer_granges <- enhancers[[1]]  # Choose the appropriate enhancer dataset
+
+# Find overlaps with gene regions
+gene_overlaps <- findOverlaps(overlapping_peaks, gene_granges)
+
+# Find overlaps with TSS regions
+tss_overlaps <- findOverlaps(overlapping_peaks, tss_granges)
+
+# Find overlaps between the ATAC-seq peaks and exons
+exon_overlaps <- findOverlaps(overlapping_peaks, exon_granges)
+
+# Find overlaps between the ATAC-seq peaks and UTR 3
+utr_3_overlaps <- findOverlaps(overlapping_peaks, utr_3_granges)
+
+# Find overlaps between the ATAC-seq peaks and UTR 5
+utr_5_overlaps <- findOverlaps(overlapping_peaks, utr_5_granges)
+
+# Find overlaps between the ATAC-seq peaks and enhancers
+enhancer_overlaps <- findOverlaps(overlapping_peaks, enhancer_granges)
+
+
+# Add annotation
+overlapping_peaks$overlaps_gene <- FALSE
+overlapping_peaks$overlaps_gene[queryHits(gene_overlaps)] <- TRUE
+
+overlapping_peaks$overlaps_tss <- FALSE
+overlapping_peaks$overlaps_tss[queryHits(tss_overlaps)] <- TRUE
+
+overlapping_peaks$overlaps_utr_3 <- FALSE
+overlapping_peaks$overlaps_utr_3[queryHits(utr_3_overlaps)] <- TRUE
+
+overlapping_peaks$overlaps_utr_5 <- FALSE
+overlapping_peaks$overlaps_utr_5[queryHits(utr_5_overlaps)] <- TRUE
+
+overlapping_peaks$overlaps_exon <- FALSE
+overlapping_peaks$overlaps_exon[queryHits(exon_overlaps)] <- TRUE
+
+overlapping_peaks$overlaps_enhancer <- FALSE
+overlapping_peaks$overlaps_enhancer[queryHits(enhancer_overlaps)] <- TRUE
+
+# View the result
+view(overlapping_peaks)
+
+
+# Example of combining all annotations into the GRanges metadata:
+overlapping_peaks$Genes <- ifelse(overlapping_peaks$overlaps_gene, "Gene", "Intergenic")
+overlapping_peaks$TSS <- ifelse(overlapping_peaks$overlaps_tss, "TSS", "Non-TSS")
+overlapping_peaks$UTR_3 <- ifelse(overlapping_peaks$overlaps_utr_3, "3'UTR", "Non-3'UTR")
+overlapping_peaks$UTR_5 <- ifelse(overlapping_peaks$overlaps_utr_5, "5'UTR", "Non-5'UTR")
+overlapping_peaks$Exon <- ifelse(overlapping_peaks$overlaps_exon, "Exon", "Non-Exon")
+overlapping_peaks$Enhancers <- ifelse(overlapping_peaks$overlaps_enhancer, "Enhancer", "Non-Enhancer")
+
+# View the annotated peaks
+overlapping_peaks
+
+# Combine counts for UTRs, exons, and enhancers
+overlap_summary <- data.frame(
+  Feature = c("UTR_3", "UTR_5", "Exons", "Enhancers", "Genes", "TSS"),
+  Overlap_Count = c(
+    sum(overlapping_peaks$overlaps_utr_3),
+    sum(overlapping_peaks$overlaps_utr_5),
+    sum(overlapping_peaks$overlaps_exon), 
+    sum(overlapping_peaks$overlaps_enhancer),
+    sum(overlapping_peaks$overlaps_gene),
+    sum(overlapping_peaks$overlaps_tss)
+  )
+)
+
+# Print the overlap summary
+view(overlap_summary)
+
+# Create a summary of peaks that overlap with both UTRs and Exons, etc.
+multi_overlap_summary <- table(
+  overlaps_utr = overlapping_peaks$overlaps_utr_5,
+  overlaps_exon = overlapping_peaks$overlaps_exon,
+  overlaps_enhancer = overlapping_peaks$overlaps_enhancer
+)
+
+# Print the multi-overlap summary
+print(multi_overlap_summary)
+
+
+### computing motif activities
+Myo_multi <- Signac::RunChromVAR(
+  Myo_multi,
+  genome = BSgenome.Hsapiens.UCSC.hg38
+)
+
+DefaultAssay(Myo_multi) <- 'chromvar'
+
+# look at the activity of NFYA and SRF
+p1 <- FeaturePlot(
+  object = Myo_multi,
+  features = "MA0060.3",
+  min.cutoff = 'q10',
+  max.cutoff = 'q90',
+  pt.size = 0.1,
+  reduction = "wnn.umap"
+)
+p2 <- FeaturePlot(
+  object = Myo_multi,
+  features = "MA0083.3",
+  min.cutoff = 'q10',
+  max.cutoff = 'q90',
+  pt.size = 0.1,
+  reduction = "wnn.umap"
+)
+p1 +p2
+
+## We can also directly test for differential activity scores between cell types
+Idents(Myo_multi) <- "ident"
+CM4_like_differential.activity <- FindMarkers(
+  object = Myo_multi,
+  ident.1 = 'CM4 like',
+  ident.2 = 'not CM4 like',
+  only.pos = TRUE,
+  mean.fxn = rowMeans,
+  fc.name = "avg_diff"
+)
+
+MotifPlot(
+  object = Myo_multi,
+  motifs = head(rownames(CM4_like_differential.activity)),
+  assay = 'ATAC'
+)
+
+Idents(Myo_multi) <- "predicted"
+Myo3_like_differential.activity <- FindMarkers(
+  object = Myo_multi,
+  ident.1 = 'Myo3 like',
+  ident.2 = 'not Myo3 like',
+  only.pos = TRUE,
+  mean.fxn = rowMeans,
+  fc.name = "avg_diff"
+)
+
+MotifPlot(
+  object = Myo_multi,
+  motifs = head(rownames(Myo3_like_differential.activity)),
+  assay = 'ATAC'
+)
+
+#### motif footprinting
+
+# gather the footprinting information for sets of motifs
+DefaultAssay(Myo_multi) <- "ATAC"
+Myo_multi <- Footprint(
+  object = Myo_multi,
+  motif.name = c("NRF1"),
+  genome = BSgenome.Hsapiens.UCSC.hg38
+)
+
+# plot the footprint data for each group of cells
+Idents(Myo_multi) <-"seurat_clusters"
+PlotFootprint(Myo_multi, features = c("KLF15", "SP9"))
+
+### ~~~~~~~~~~~~find DEG that also have DEP~~~~~~~~~~~~~~~
+
+# Link peaks to genes
+linked_peaks <- LinkPeaks(
+  object = Myo_multi,
+  peak.assay = "ATAC",
+  expression.assay = "SCT",
+  genes.use = rownames(Myo3_like.markers)  # Only link peaks related to DEGs
+)
+
+# Identify overlap between DEGs and genes linked to differential peaks
+overlap_genes <- intersect(rownames(Myo3_like.markers), linked_peaks@assays$ATAC@links$gene)
+
+write.csv(overlap_genes, file = "Myo multi DEGs with DEPs predicted id.csv")
+
+# Correlation between peak accessibility and gene expression
+correlation_results <- FeatureScatter(Myo_multi, feature1 = "ATAC_peak", feature2 = "GENE_NAME", assay = "SCT")
+
+
+
+############################################
+############ Miao's code ###################
+############################################
+### differential gene analysis
+Idents(Multi) <- "sample"
+DEG <- FindMarkers(Multi, ident.1 = "2", ident.2 = "1", test.use = "wilcox",logfc.threshold =0,min.pct = 0.1)
+write.table(DEG, "CM.NfyaKO_WT_DEG.wilcox.txt")
+## find markers genes for clusters 0,13,15,16,12
+Idents(Multi) <- "seurat_clusters"
+C0 <- FindMarkers(Multi, ident.1 = "0", test.use = "wilcox")
+write.table(C0, "C0.wilcox.txt")
+
+C13 <- FindMarkers(Multi, ident.1 = "13", test.use = "wilcox")
+write.table(C13, "C13.wilcox.txt")
+
+C1516 <- FindMarkers(NFYA, ident.1 = c("15","16"), test.use = "wilcox")
+write.table(C1516, "C1516.wilcox.txt")
+
+C12 <- FindMarkers(NFYA, ident.1 = "12", test.use = "wilcox")
+write.table(C12, "C12.wilcox.txt")
+
+saveRDS(NFYA, file = "/Users/mcui/Documents/R-studio/NFYA_multiome_aggr/R/NFYA.rds")
+NFYA <- readRDS(file = "/Users/mcui/Documents/R-studio/NFYA_multiome_aggr/R/NFYA.rds")
+### the DEG data look strange with too many significantly changed genes
+### perform DEG on SCT data
+DefaultAssay(NFYA) <- "SCT"
+DEG <- FindMarkers(NFYA, ident.1 = "1", ident.2 = "2", test.use = "wilcox",logfc.threshold = 0)
+write.table(DEG, "ALlCM.SCT.WTKO_DEG.all.wilcox.txt")
+## find markers genes for clusters 0,13,15,16,12
+Idents(NFYA) <- "seurat_clusters"
+C0 <- FindMarkers(NFYA, ident.1 = "0", test.use = "wilcox")
+write.table(C0, "C0.SCT.wilcox.txt")
+
+C13 <- FindMarkers(NFYA, ident.1 = "13", test.use = "wilcox")
+write.table(C13, "C13.SCT.wilcox.txt")
+
+C1516 <- FindMarkers(NFYA, ident.1 = c("15","16"), test.use = "wilcox")
+write.table(C1516, "C1516.SCT.wilcox.txt")
+
+C12 <- FindMarkers(NFYA, ident.1 = "12", test.use = "wilcox")
+write.table(C12, "C12.SCT.wilcox.txt")
+
+VlnPlot(object = NFYA, features = c("Tnni1","Myh7","Acta2","Myh6","Dmd"),split.by = "sample",pt.size  = 0, adjust=2, slot = "data",assay = "SCT")
+VlnPlot(object = NFYA , features = c("Tnni1","Myh7","Acta2","Myh6","Dmd"),split.by = "sample",pt.size  = 0, adjust=2, slot = "data",assay = "SCT")
+FeaturePlot(object = NFYA, features = c("Mki67","Ccnb1","Ccnb2"),max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Myh3","Nppa","Nppb"),max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Myl3","Myl1"),max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Nodal","Lefty1","Pitx2"),max.cutoff = "100")
+### LV?
+FeaturePlot(object = NFYA, features = c("Nodal","Lefty","Pitx2"),max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Hand1","Tbx5","Tbx18","Myl1","Gja5"),max.cutoff = "100")
+
+### RV?
+FeaturePlot(object = NFYA, features = c("Irx4","Plagl1"),max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Mfap2","Myl3","Hand2"),max.cutoff = "100")
+
+### ventricles
+FeaturePlot(object = NFYA, features = c("Myh7","S100A1","Lbh","Hand1","Irx3","Nfia"),max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Myh7","Myl2","Irx3","Irx5","Irx6","Masp1","Hey2","Prdm16"),max.cutoff = "100")
+
+### atria
+FeaturePlot(object = NFYA, features = c("Myh6","Pam","Calb2","Hand2","Nr2f1","Egr2"),max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Aldh1a2","Ror2","Synpr","Hand2","Nr2f1","Egr2"),max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Gja1","Csq2","Kcnk3"),max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Tbx5","Tbx18"),max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Sbk2","Sbk3","Zfp579"),max.cutoff = "100")
+
+## ### plot marker genes for all the cell types
+Idents(NFYA) <- "seurat_clusters"
+allmarkers <-FindAllMarkers(NFYA, only.pos = T, min.pct = 0.25,logfc.threshold = 0.25)
+allmarkers %>%
+  group_by(cluster) %>%
+  top_n(n = 2, wt = avg_log2FC)
+allmarkers %>%
+  group_by(cluster) %>%
+  top_n(n = 10, wt = avg_log2FC) -> top10
+DoHeatmap(NFYA, features = top10$gene) + NoLegend()
+write.table(allmarkers, "allmarkers.SCT.wilcox.txt")
+
+### identify markers for clusters 1, 3,5,11,12,17
+DefaultAssay(NFYA) <- "SCT"
+C <- FindMarkers(NFYA, ident.1 = c("1","3","5","11","12","17"), test.use = "wilcox")
+write.table(C, "C1.3.5.11.12.17.SCT.wilcox.txt")
+
+FeaturePlot(object = NFYA, features = c("Dcc","Rbm20","Ryr2","Pvt1"),max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Sod2","Mif","Nfe2l1","Nfya"),max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Myl7","Myl4","Nppa","Nppb"),max.cutoff = "100")
+### plot nfya expression between WT and KO
+Idents(NFYA) <- "sample"
+VlnPlot(object = NFYA, features = c("Nfya","Mki67","Ccnb1","Ccnb2"),split.by = "sample",pt.size  = 0, adjust=1, slot = "data",assay = "SCT")
+
+### assign cell cycle scores
+Idents(NFYA) <- "seurat_clusters"
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+### convert cell cycle gene list to mouse compatible lowercase
+### first convert all letters to lowercase
+s.genes <- tolower(s.genes)
+g2m.genes <- tolower(g2m.genes)
+### next convert the first letter back to uppercase
+s.genes <- str_to_title(s.genes)
+g2m.genes <- str_to_title(g2m.genes) 
+
+NFYA <- CellCycleScoring(NFYA, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+head(NFYA[[]])
+table(NFYA$sample, NFYA$Phase)
+DimPlot(NFYA, reduction = "umap.rna", group.by = "Phase", label.size = 2.5, repel = TRUE)
+FeaturePlot(NFYA, reduction = "umap.rna", label = TRUE, label.size = 2.5, repel = TRUE, features="G2M.Score")
+
+
+####### reference mapping with the previous P1 snRNA seq to identify CM4 in NFYA datasets.
+setwd("/Users/mcui/Documents/R-studio/NFYA_multiome_aggr/R")
+NFYA <- readRDS(file = "/Users/mcui/Documents/R-studio/NFYA_multiome_aggr/R/NFYA.rds")
+DefaultAssay(NFYA) <- "SCT"
+### load the P1 snRNA CM data
+load("/Users/mcui/Documents/R-studio/AllCM.SeuratV3.Robj")
+DimPlot(heart.integrated.rm.CMx, label=T, group.by="CellType",)
+P1ShamCells <- rownames(heart.integrated.rm.CMx@meta.data[heart.integrated.rm.CMx@meta.data$tech=="P1_1Sham",])
+P1ShamD1_CM <- subset(heart.integrated.rm.CMx, cells= P1ShamCells)
+DimPlot(P1ShamD1_CM, label=T, group.by = "CellType")
+
+CM1Cells <- rownames(P1ShamD1_CM@meta.data[P1ShamD1_CM@meta.data$CellType =="CM1",])
+CM2Cells <- rownames(P1ShamD1_CM@meta.data[P1ShamD1_CM@meta.data$CellType =="CM2",])
+CM3Cells <- rownames(P1ShamD1_CM@meta.data[P1ShamD1_CM@meta.data$CellType =="CM3",])
+CM4Cells <- rownames(P1ShamD1_CM@meta.data[P1ShamD1_CM@meta.data$CellType =="CM4",])
+CM5Cells <- rownames(P1ShamD1_CM@meta.data[P1ShamD1_CM@meta.data$CellType =="CM5",])
+P1ShamD1_CM <- subset(P1ShamD1_CM, cells= c(CM1Cells,CM2Cells, CM3Cells, CM4Cells, CM5Cells))
+DimPlot(P1ShamD1_CM, label=T, group.by = "CellType")
+
+P1ShamD1_CM<- SCTransform(P1ShamD1_CM, verbose = FALSE) %>% RunPCA() %>% RunUMAP(dims = 1:50, reduction.name = 'umap.rna', reduction.key = 'rnaUMAP_')
+
+anchors <- FindTransferAnchors(reference = P1ShamD1_CM, query = NFYA, dims = 1:30,normalization.method = "SCT") 
+predictions <- TransferData(anchorset =anchors, refdata = P1ShamD1_CM$CellType,dims = 1:30)
+NFYA <- AddMetaData(NFYA, metadata = predictions)
+
+DimPlot(NFYA, reduction = "umap.rna", label = TRUE, label.size = 2.5, repel = TRUE,split.by = "predicted.id")
+#### RESULT saved in "/Users/mcui/Documents/R-studio/NFYA_multiome_aggr/R/CM1-5_predictions.pdf"
+##### CM4 cells were identified. Cluster 0.4.14 were predicted to CM4-like
+### CM4 were identified at lower frequency. 
+
+### try all CM not subset for a P1ShamD1
+
+CM1Cells <- rownames(heart.integrated.rm.CMx@meta.data[heart.integrated.rm.CMx@meta.data$CellType =="CM1",])
+CM2Cells <- rownames(heart.integrated.rm.CMx@meta.data[heart.integrated.rm.CMx@meta.data$CellType =="CM2",])
+CM3Cells <- rownames(heart.integrated.rm.CMx@meta.data[heart.integrated.rm.CMx@meta.data$CellType =="CM3",])
+CM4Cells <- rownames(heart.integrated.rm.CMx@meta.data[heart.integrated.rm.CMx@meta.data$CellType =="CM4",])
+CM5Cells <- rownames(heart.integrated.rm.CMx@meta.data[heart.integrated.rm.CMx@meta.data$CellType =="CM5",])
+CM <- subset(heart.integrated.rm.CMx, cells= c(CM1Cells,CM2Cells, CM3Cells, CM4Cells, CM5Cells))
+DimPlot(CM, label=T, group.by = "CellType")
+
+CM<- SCTransform(CM, verbose = FALSE) 
+
+CM1Cells <- WhichCells(heart.integrated.rm.CMx, cells=CM1Cells, downsample= 200)
+CM2Cells <- WhichCells(heart.integrated.rm.CMx, cells=CM2Cells, downsample= 200)
+CM3Cells <- WhichCells(heart.integrated.rm.CMx, cells=CM3Cells, downsample= 200)
+CM4Cells <- WhichCells(heart.integrated.rm.CMx, cells=CM4Cells, downsample= 200)
+CM5Cells <- WhichCells(heart.integrated.rm.CMx, cells=CM5Cells, downsample= 200)
+CM <- subset(heart.integrated.rm.CMx, cells= c(CM1Cells,CM2Cells, CM3Cells, CM4Cells, CM5Cells))
+
+DimPlot(CM , label=T, group.by = "CellType")
+
+
+anchors <- FindTransferAnchors(reference = CM, query = NFYA, dims = 1:30,normalization.method = "SCT") 
+predictions <- TransferData(anchorset =anchors, refdata = CM$CellType,dims = 1:30)
+NFYA <- AddMetaData(NFYA, metadata = predictions)
+DimPlot(NFYA, reduction = "umap.rna", label = TRUE, label.size = 2.5, repel = TRUE,split.by = "predicted.id")
+#### RESULT is similar to the above analysis when subset sample P1ShamD1 was used as reference.
+
+
+##############################################################
+### use AddModuleScore for CM4 marker genes
+load("/Users/mcui/Documents/R-studio/AllCM.SeuratV3.Robj")
+### find CM4 markers 
+Idents(heart.integrated.rm.CMx) <- "CellType"
+CM4.marker <- FindMarkers(heart.integrated.rm.CMx, ident.1 = "CM4", ident.2 = "CM1", test.use = "wilcox")
+write.table(CM4.marker, "CM4.marker.txt")
+
+CM4Markers <- list(c("1700016D06Rik",
+                    "2010107E04Rik",
+                    "Acadvl",
+                    "Acot2",
+                    "Acta1",
+                    "Acta2",
+                    "Actb",
+                    "Actc1",
+                    "Aldoa",
+                    "Anapc13",
+                    "Anxa2",
+                    "Apoe",
+                    "Aprt",
+                    "Arl6ip1",
+                    "Arpc1b",
+                    "Aspn",
+                    "Atox1",
+                    "Atp5b",
+                    "Atp5e",
+                    "Atp5g1",
+                    "Atp5g3",
+                    "Atp5h",
+                    "Atp5j",
+                    "Atp5j2",
+                    "Atp5l",
+                    "B2m",
+                    "Bgn",
+                    "Calm1",
+                    "Calr",
+                    "Cav1",
+                    "Cd34",
+                    "Cd63",
+                    "Cd9",
+                    "Cd93",
+                    "Cdh5",
+                    "Cdk1",
+                    "Cenpf",
+                    "Cfap46",
+                    "Cfl1",
+                    "Chchd10",
+                    "Ckm",
+                    "Cks2",
+                    "Clu",
+                    "Col14a1",
+                    "Col15a1",
+                    "Col1a1",
+                    "Col1a2",
+                    "Col3a1",
+                    "Col4a1",
+                    "Col5a1",
+                    "Col5a2",
+                    "Col6a1",
+                    "Col6a2",
+                    "Col6a3",
+                    "Cox5a",
+                    "Cox5b",
+                    "Cox6a2",
+                    "Cox6b1",
+                    "Cox6c",
+                    "Cox7a2",
+                    "Cox7c",
+                    "Cox8b",
+                    "Crip1",
+                    "Cryab",
+                    "Cst3",
+                    "Cstb",
+                    "Cthrc1",
+                    "Ctla2a",
+                    "Ctla4",
+                    "Ctsb",
+                    "Ctsd",
+                    "Ctsl",
+                    "Ctsz",
+                    "Cycs",
+                    "Dbi",
+                    "Dcn",
+                    "Ddah1",
+                    "Des",
+                    "Dpt",
+                    "Ebf1",
+                    "Eef1a1",
+                    "Eln",
+                    "Emilin1",
+                    "Emp1",
+                    "Ets1",
+                    "Fabp3",
+                    "Fabp3-ps1",
+                    "Fabp4",
+                    "Fabp5",
+                    "Fbn1",
+                    "Fcrla",
+                    "Fh1",
+                    "Fn1",
+                    "Fstl1",
+                    "Fth1",
+                    "Ftl1",
+                    "Fyb",
+                    "Gclm",
+                    "Gm10036",
+                    "Gm10053",
+                    "Gm10073",
+                    "Gm10116",
+                    "Gm10250",
+                    "Gm10260",
+                    "Gm10263",
+                    "Gm11273",
+                    "Gm11808",
+                    "Gm2000",
+                    "Gm8186",
+                    "Gm8730",
+                    "Gm8797",
+                    "Gm9493",
+                    "Gm9843",
+                    "Gnai2",
+                    "Gpihbp1",
+                    "Gpx1",
+                    "Gpx3",
+                    "Grik3",
+                    "Grn",
+                    "Gsn",
+                    "H19",
+                    "H2-D1",
+                    "H2afz",
+                    "Hba-a1",
+                    "Hba-a2",
+                    "Hbb-bs",
+                    "Hbb-bt",
+                    "Hist1h2bc",
+                    "Hnrnpa0",
+                    "Hsd17b4",
+                    "Hsp90ab1",
+                    "Hspa8",
+                    "Hspb1",
+                    "Hspe1",
+                    "Ifitm2",
+                    "Ifitm3",
+                    "Igfbp7",
+                    "Itm2a",
+                    "Itm2b",
+                    "Kcnk2",
+                    "Lgals1",
+                    "Loxl2",
+                    "Ltbp4",
+                    "Lum",
+                    "Ly6e",
+                    "Lyz2",
+                    "Maged2",
+                    "Marcks",
+                    "Mb",
+                    "Mdh2",
+                    "Mdk",
+                    "Mfap2",
+                    "Mfap4",
+                    "Mgp",
+                    "Mgst3",
+                    "Mif",
+                    "mt-Atp6",
+                    "mt-Co1",
+                    "mt-Co2",
+                    "mt-Co3",
+                    "mt-Cytb",
+                    "mt-Nd1",
+                    "mt-Nd2",
+                    "mt-Nd3",
+                    "mt-Nd4",
+                    "mt-Nd4l",
+                    "mt-Nd5",
+                    "mt-Nd6",
+                    "Mt1",
+                    "Mt2",
+                    "Myl3",
+                    "Ndufa1",
+                    "Ndufa12",
+                    "Ndufa2",
+                    "Ndufa4",
+                    "Ndufa5",
+                    "Ndufb11",
+                    "Ndufb5",
+                    "Ndufb7",
+                    "Ndufb8",
+                    "Ndufb9",
+                    "Ndufc1",
+                    "Ndufs2",
+                    "Ndufs6",
+                    "Ndufv3",
+                    "Nid1",
+                    "Nppa",
+                    "Nrg1",
+                    "P4hb",
+                    "Pcolce",
+                    "Pdha1",
+                    "Pdia6",
+                    "Pfn1",
+                    "Pgam2",
+                    "Plcb1",
+                    "Pmp22",
+                    "Postn",
+                    "Ppia",
+                    "Prdx1",
+                    "Prdx4",
+                    "Prdx5",
+                    "Psap",
+                    "Ptma",
+                    "Ptn",
+                    "Ptrf",
+                    "Pttg1",
+                    "Rabgef1",
+                    "Rbp1",
+                    "Rcn3",
+                    "Rgs5",
+                    "Rpl17",
+                    "Rpl18a",
+                    "Rpl19",
+                    "Rpl26",
+                    "Rpl27-ps3",
+                    "Rpl27a",
+                    "Rpl32",
+                    "Rpl35a",
+                    "Rpl41",
+                    "Rpl6l",
+                    "Rpl9-ps6",
+                    "Rplp0",
+                    "Rplp1",
+                    "Rps12-ps3",
+                    "Rps14",
+                    "Rps16",
+                    "Rps18-ps3",
+                    "Rps19",
+                    "Rps23",
+                    "Rps26-ps1",
+                    "Rps27a",
+                    "Rps27rt",
+                    "Rps29",
+                    "Rps3",
+                    "Rps3a1",
+                    "Rps4x",
+                    "Rps5",
+                    "Rps6",
+                    "Rps8",
+                    "Rps9",
+                    "Rpsa",
+                    "S100a1",
+                    "S100a10",
+                    "S100a11",
+                    "S100a16",
+                    "S100a6",
+                    "Sepp1",
+                    "Serpine2",
+                    "Serpinh1",
+                    "Sfrp1",
+                    "Slc16a2",
+                    "Slc39a1",
+                    "Spag6l",
+                    "Sparc",
+                    "Sparcl1",
+                    "Spp1",
+                    "Stmn1",
+                    "Tagln",
+                    "Tagln2",
+                    "Tecpr2",
+                    "Thbs1",
+                    "Timp1",
+                    "Tmsb10",
+                    "Tmsb4x",
+                    "Top2a",
+                    "Tpi1",
+                    "Tpt1",
+                    "Tspan13",
+                    "Tspo",
+                    "Tuba1a",
+                    "Tuba1b",
+                    "Tubb4b",
+                    "Tubb5",
+                    "Txn1",
+                    "Txndc5",
+                    "Ubb",
+                    "Ucp2",
+                    "Uqcr10",
+                    "Uqcr11",
+                    "Uqcrb",
+                    "Uqcrfs1",
+                    "Uqcrh",
+                    "Uqcrq",
+                    "Vim",
+                    "Wbp5",
+                    "Wdr89"))
+DefaultAssay(NFYA) <- "SCT"
+NFYA <- AddModuleScore(
+  NFYA,
+  CM4Markers,
+  pool = NULL,
+  nbin = 24,
+  ctrl = 100,
+  k = FALSE,
+  assay = NULL,
+  name = "CM4")
+FeaturePlot(NFYA, reduction = "umap.rna", label = TRUE, label.size = 2.5, repel = TRUE, features="CM41", split.by = "sample")
+
+#### t o run this code, need to install RColorBrewer
+FeaturePlot(NFYA,
+            features = "CM41", label = TRUE, repel = TRUE) +
+  scale_colour_gradientn(colours = rev(brewer.pal(n = 11, name = "RdBu")))
+library(tidyverse)
+library(RColorBrewer)
+####
+table(NFYA$sample, NFYA$CM41)
+a <-as.matrix(NFYA$CM41)
+write.table(a, 
+            'CM4_score.csv', 
+            sep = ',', row.names = T, col.names = T, quote = F)
+Idents(NFYA) <- "sample"
+VlnPlot(NFYA, features = "CM41",pt.size = 0)
+VlnPlot(NFYA, features = c("Tpi1","Aldoa","Pgk1","Eno1","Pgm2"),pt.size = 0,adjust = 2)
+
+VlnPlot(NFYA, features = c("Cox8a","Cox8b","Uqcr2","Uqcr10","Atp5d","Atp5e","Atp5b"),pt.size = 0,adjust = 2)
+
+#### AddModule for maturation genes
+
+MatrMarkers <- list(c("Anxa3",
+                      "Gm14327",
+                      "Ube2ql1",
+                      "Fam46b",
+                      "Trim16",
+                      "Trib1",
+                      "Plcb1",
+                      "Palmd",
+                      "Plscr4",
+                      "Fxyd6",
+                      "Adamts10",
+                      "Tlr4",
+                      "1110034G24Rik",
+                      "Trp53i11",
+                      "Aox1",
+                      "Tns2",
+                      "Mocos",
+                      "Tmcc3",
+                      "Abi3bp",
+                      "Rasgrf2",
+                      "Meox2",
+                      "Rasip1",
+                      "Mecom",
+                      "Sh3tc2",
+                      "Kif6",
+                      "2310069G16Rik",
+                      "Sema6a",
+                      "Plin5",
+                      "Cnksr1",
+                      "Cdkn1a",
+                      "Podn",
+                      "Notch3",
+                      "Extl1",
+                      "Wipf3",
+                      "Ebf3",
+                      "St8sia4",
+                      "Pstpip2",
+                      "Gm1305",
+                      "Agtpbp1",
+                      "Kcnb1",
+                      "Ebf1",
+                      "Eng",
+                      "Zfp423",
+                      "Kcnc2",
+                      "Sybu",
+                      "Npr3",
+                      "Hspb8",
+                      "Gm14005",
+                      "Fam129a",
+                      "Adamtsl4",
+                      "Mlxipl",
+                      "Pdgfrb",
+                      "Plekhh2",
+                      "Acsl6",
+                      "B2m",
+                      "Dmpk",
+                      "Srrm4",
+                      "Fli1",
+                      "Fas",
+                      "Cpeb1",
+                      "Fbln2",
+                      "Csmd1",
+                      "Nos3",
+                      "Gm44127",
+                      "Jade2",
+                      "Lnx1",
+                      "Axl",
+                      "Tacc2",
+                      "Afap1l2",
+                      "Uba7",
+                      "Gm14400",
+                      "Tob2",
+                      "Kitl",
+                      "Adamtsl5",
+                      "Lmo2",
+                      "Mylk4",
+                      "Dgkb",
+                      "Slc22a4",
+                      "Abhd1",
+                      "Lrrc3b",
+                      "Tmem117",
+                      "P2ry1",
+                      "Sqrdl",
+                      "Adam15",
+                      "Ccdc88c",
+                      "Ptgis",
+                      "Pecam1",
+                      "Mmrn2",
+                      "Mctp1",
+                      "Gm16253",
+                      "Sbk1",
+                      "Npr1",
+                      "Aplnr",
+                      "Rapgef3",
+                      "Cd28",
+                      "Fam20a",
+                      "Scn7a",
+                      "Dock9",
+                      "Runx1",
+                      "Elmo1",
+                      "Ngf",
+                      "Col15a1",
+                      "Amph",
+                      "Vwa7",
+                      "Fam131a",
+                      "Ptprn2",
+                      "Ehd1",
+                      "Kif26a",
+                      "Atp1a2",
+                      "Itga7",
+                      "Mhrt",
+                      "Tspan13",
+                      "Adamts5",
+                      "Podxl",
+                      "Parp14",
+                      "Gm32569",
+                      "Bcar3",
+                      "Klf9",
+                      "Ip6k3",
+                      "Cdc42ep1",
+                      "Tie1",
+                      "Ppard",
+                      "Nbl1",
+                      "Entpd1",
+                      "Nrg1",
+                      "Ebf2",
+                      "Rilpl1",
+                      "Lsp1",
+                      "Ankrd9",
+                      "Cmtm8",
+                      "Gpt2",
+                      "Cyfip2",
+                      "Ppp1r16b",
+                      "P2rx6",
+                      "Esam",
+                      "Aqp7",
+                      "Sh2d3c",
+                      "Slc25a29",
+                      "Myh11",
+                      "Trim30a",
+                      "Wipf1",
+                      "Fbxo31",
+                      "Peli2",
+                      "Abca6",
+                      "Nrxn1",
+                      "Cfh",
+                      "Nrp2",
+                      "Tnfrsf21",
+                      "Gm38048",
+                      "Arap3",
+                      "Cped1",
+                      "Chrm3",
+                      "B230110C06Rik",
+                      "Tnxb",
+                      "Sema7a",
+                      "Prex2",
+                      "Megf6",
+                      "Stab1",
+                      "Stap2",
+                      "Ldhd",
+                      "Phf21b",
+                      "Mrc1",
+                      "Slco5a1",
+                      "Fitm2",
+                      "2610203C22Rik",
+                      "Gm43660",
+                      "Robo4",
+                      "42982",
+                      "P2rx5",
+                      "Gm7889",
+                      "Gm17276",
+                      "Rai2",
+                      "Abca8a",
+                      "Dock6",
+                      "Pid1",
+                      "Slc9a3r2",
+                      "Gm28694",
+                      "Casp12",
+                      "Bnc2",
+                      "Dagla",
+                      "Lrtm1",
+                      "Flt1",
+                      "Slc43a3",
+                      "Gm12409",
+                      "Palm",
+                      "Slc25a34",
+                      "Jam2",
+                      "Hspa12b",
+                      "Rhoj",
+                      "Prr33",
+                      "AU019990",
+                      "RP23-56A14.12",
+                      "Abcb4",
+                      "Gm12153",
+                      "Pcdh19",
+                      "Pdgfb",
+                      "Itgb6",
+                      "Gm29040",
+                      "Cd274",
+                      "Slfn5",
+                      "Fgd5",
+                      "Ltbp4",
+                      "Arhgap27",
+                      "Twf2",
+                      "Mal",
+                      "Grm1",
+                      "Lrrc2",
+                      "Tesc",
+                      "Wnt11",
+                      "Asap3",
+                      "Arhgef37",
+                      "Prkcq",
+                      "Adgrf5",
+                      "Egfr",
+                      "Zfp366",
+                      "Prkch",
+                      "Fblim1",
+                      "Cyyr1",
+                      "Igfbp7",
+                      "Slco3a1",
+                      "Ptprb",
+                      "Pkhd1l1",
+                      "Tap2",
+                      "Dapk1",
+                      "Colgalt2",
+                      "Ccbe1",
+                      "Gm13479",
+                      "Notch4",
+                      "Erg",
+                      "F630206G17Rik",
+                      "Ptpre",
+                      "Slc22a3",
+                      "Samd12",
+                      "Pear1",
+                      "Slc36a2",
+                      "Ano1",
+                      "Smoc2",
+                      "Neat1",
+                      "Myrip",
+                      "Magi2",
+                      "Trim54",
+                      "Gfpt2",
+                      "Thbd",
+                      "Arhgef15",
+                      "Bmp6",
+                      "Cyp4b1",
+                      "Cfap61",
+                      "Cd200",
+                      "Pdlim4",
+                      "Csf1",
+                      "Tnfaip2",
+                      "Cd300lg",
+                      "Ston2",
+                      "Cbfa2t3",
+                      "Kcnt2",
+                      "Tmem140",
+                      "Mybpc2",
+                      "Ogdhl",
+                      "Lims2",
+                      "Gm9754",
+                      "Shank3",
+                      "Fmo1",
+                      "Ephb1",
+                      "Parp3",
+                      "Pparg",
+                      "Prodh",
+                      "Ankrd55",
+                      "Dnm3",
+                      "Vwf",
+                      "Adgrl4",
+                      "Irgm1",
+                      "Mcf2l",
+                      "Ces1d",
+                      "Phkg1",
+                      "Dlgap1",
+                      "Hcn2",
+                      "Klhdc8a",
+                      "Ushbp1",
+                      "Ckmt2",
+                      "Gm5532",
+                      "H2-Q4",
+                      "Pcsk6",
+                      "Dok5",
+                      "Htra3",
+                      "Agmo",
+                      "Epha6",
+                      "2310039L15Rik",
+                      "Hmcn2",
+                      "Trim72",
+                      "Sh3rf2",
+                      "Gm26862",
+                      "Gm12092",
+                      "Gm12002",
+                      "Gbp7",
+                      "Acss1",
+                      "Trim7",
+                      "Gm16685",
+                      "4930481A15Rik",
+                      "Slc16a9",
+                      "Arhgef19",
+                      "Aqp1",
+                      "Gm31663",
+                      "Ptgfr",
+                      "Myh14",
+                      "Gm43565",
+                      "Vwa3a",
+                      "Ccdc85a",
+                      "Tmem82",
+                      "Zbtb16",
+                      "Foxo6os",
+                      "Mme",
+                      "Bcl6",
+                      "Tmprss13",
+                      "2310002L09Rik",
+                      "Pla2g5",
+                      "Gm17428",
+                      "Dpysl4",
+                      "Xirp2",
+                      "Slc26a10",
+                      "Dapk2",
+                      "Col8a1",
+                      "Pdxk-ps",
+                      "H2-K1",
+                      "Gm12724",
+                      "Gm11967",
+                      "Rgs7",
+                      "A530013C23Rik",
+                      "Gm16163",
+                      "Xaf1",
+                      "Rxrg",
+                      "F13a1",
+                      "Abcc1",
+                      "Thrb",
+                      "H2-D1",
+                      "Limch1",
+                      "Sp100",
+                      "A930018M24Rik",
+                      "Mas1",
+                      "Tuba8",
+                      "Pah",
+                      "Rtn4r",
+                      "Gm14532",
+                      "Edar",
+                      "Ctla4",
+                      "Klhl33",
+                      "Col5a3",
+                      "Tap1",
+                      "Irgm2",
+                      "Lncpint",
+                      "Ackr3",
+                      "Galnt15",
+                      "Hr",
+                      "Gm34302",
+                      "Bdnf",
+                      "Slc38a3",
+                      "Gm11732",
+                      "Adra1a",
+                      "Gm45018",
+                      "Mapt",
+                      "Arhgap20",
+                      "2310020H05Rik",
+                      "Gm20532",
+                      "St8sia1",
+                      "Tmem255b",
+                      "Hrasls",
+                      "2210408F21Rik",
+                      "RP23-57D10.3",
+                      "Rpl3l",
+                      "Rhbdl3",
+                      "Kcnd3",
+                      "P2ry2",
+                      "Acsm5",
+                      "Ntng2",
+                      "Sec14l5",
+                      "Magix",
+                      "Kcnd3os",
+                      "Rp1",
+                      "Iigp1",
+                      "B3galt2",
+                      "Xdh",
+                      "Gck",
+                      "Art1",
+                      "Pnpla3",
+                      "Nlrc5",
+                      "Alpl",
+                      "Kcnv2",
+                      "Csdc2",
+                      "Lgi1",
+                      "Gm28979",
+                      "Gm12185",
+                      "F830016B08Rik",
+                      "BC023105",
+                      "Gm4841"))
+DefaultAssay(NFYA) <- "SCT"
+NFYA <- AddModuleScore(
+  NFYA,
+  MatrMarkers,
+  pool = NULL,
+  nbin = 24,
+  ctrl = 100,
+  k = FALSE,
+  assay = NULL,
+  name = "Matr")
+FeaturePlot(NFYA, reduction = "umap.rna", label = TRUE, label.size = 2.5, repel = TRUE, features="Matr1", split.by = "sample")
+######## CONCLUSION
+######## no clear separation of Maturation gene expression between clusters
+
+#####  Glycolysis genes
+Gly <- list(c("Aldoa",
+              "Eno3",
+              "Gapdh",
+              "Got1",
+              "Ldha",
+              "Ldhb",
+              "Mdh2",
+              "Mdh1",
+              "Pgam1",
+              "Pgk1",
+              "Pkm",
+              "Tpi1",
+              "Pgam2",
+              "Fh1",
+              "Sdhb",
+              "Idh2",
+              "Hmgb1",
+              "B3galt1",
+              "Acadl",
+              "Dbi",
+              "Fabp3",
+              "Mif",
+              "Acaa2",
+              "Ndufab1",
+              "Etfb",
+              "Elob"))
+NFYA <- AddModuleScore(
+  NFYA,
+  Gly,
+  pool = NULL,
+  nbin = 24,
+  ctrl = 100,
+  k = FALSE,
+  assay = NULL,
+  name = "Glycolysis")
+FeaturePlot(NFYA, reduction = "umap.rna", label = TRUE, label.size = 2.5, repel = TRUE, features="Glycolysis1", split.by = "sample")
+
+### DEG analysis on Cluster 0 between WT and KO
+NFYA$celltype.stim <- paste(Idents(NFYA), NFYA$sample, sep = "_")
+NFYA$celltype <- Idents(NFYA)
+Idents(NFYA) <- "celltype.stim"
+DEG <- FindMarkers(NFYA, ident.1 = "0_1", ident.2 = "1_2", test.use = "wilcox")
+write.table(DEG, "Cluster1.WT.KO_DEG.wilcox.txt")
+
+DEG <- FindMarkers(NFYA, ident.1 = "2_1", ident.2 = "2_2", test.use = "wilcox")
+write.table(DEG, "Cluster2.WT.KO_DEG.wilcox.txt")
+
+DEG <- FindMarkers(NFYA, ident.1 = "1_1", ident.2 = "1_2", test.use = "wilcox")
+write.table(DEG, "Cluster1.WT.KO_DEG.wilcox.txt")
+
+
+###### ATAC analysis 
+############### recall peaks using macs
+################ remake object WNN with RNA data
+############### PCR di 2:50
+BiocManager::install("chromVAR")
+BiocManager::install("TFBSTools",force = TRUE)
+BiocManager::install("JASPAR2020")
+BiocManager::install("motifmatchr")
+library(devtools)
+library(chromVAR)
+library(JASPAR2020)
+library(TFBSTools)
+library(motifmatchr)
+library(EnsDb.Mmusculus.v79)
+library (BSgenome.Mmusculus.UCSC.mm10)
+DefaultAssay(NFYA) <- "ATAC"
+setwd("/Users/mcui/Documents/R-studio/NFYA_multiome_aggr/R/ATAC")
+
+#### QC
+# compute nucleosome signal score per cell
+NFYA <- NucleosomeSignal(object = NFYA)
+FragmentHistogram(object = NFYA)
+# compute TSS enrichment score per cell
+NFYA <- TSSEnrichment(object = NFYA, fast = TRUE)
+TSSPlot(NFYA) 
+# add blacklist ratio and fraction of reads in peaks
+NFYA$pct_reads_in_peaks <- NFYA$peak_region_fragments / NFYA$passed_filters * 100
+NFYA$blacklist_ratio <-NFYA$blacklist_region_fragments / NFYA$peak_region_fragments
+
+DepthCor(NFYA)
+
+CoveragePlot(NFYA, region = 'Nfe2l1', features = 'Nfe2l1', assay = 'ATAC', expression.assay = 'SCT', peaks = FALSE)
+
+
+#### motif foot printing 
+# extract position frequency matrices for the motifs
+pwm <- getMatrixSet(
+  x = JASPAR2020,
+  opts = list(species = 9606, all_versions = FALSE)
+)
+### separte samples of origin
+NFYA$sample <- gsub("[^1-2]","",rownames(NFYA@meta.data))
+
+# add motif information
+NFYA <- AddMotifs(NFYA, genome = BSgenome.Mmusculus.UCSC.mm10, pfm = pwm)
+# gather the footprinting information for sets of motifs
+NFYA <- Footprint(
+  object = NFYA,
+  motif.name = c("NFYA","NFYB","NFYC"),
+  genome = BSgenome.Mmusculus.UCSC.mm10,
+  in.peaks = TRUE
+)
+# plot the footprint data for each group of cells
+p2 <- PlotFootprint(NFYA, features = c("NFYA","NFYB","NFYC"),group.by = "sample" )
+p2 + patchwork::plot_layout(ncol = 1)
+
+NFYA <- Footprint(
+  object = NFYA,
+  motif.name = c("KLF15","KLF14","SP4"),
+  genome = BSgenome.Mmusculus.UCSC.mm10,
+  in.peaks = TRUE
+)
+# plot the footprint data for each group of cells
+p2 <- PlotFootprint(NFYA, features = c("KLF15","KLF14","SP4"),group.by = "sample" )
+p2 + patchwork::plot_layout(ncol = 1)
+
+
+###### differential peaks analysis between WT and KO
+Idents(NFYA) <- "sample"
+da_peaks <- FindMarkers(
+  object = NFYA,
+  ident.1 = "1",
+  ident.2 = "2",
+  min.pct = 0.05,
+  test.use = 'LR',
+  logfc.threshold = 0.01
+)
+head(da_peaks)
+write.table(da_peaks, "AllCM.WT.KO_Diff.Peaks.txt")
+#### visualize the top peaks
+cov_plot <- CoveragePlot(
+  object = NFYA,
+  region = "chr19-42128701-42129609",
+  extend.upstream = 1000,
+  extend.downstream = 1000,
+  annotation = T,
+  peaks = T
+)
+cov_plot
+### identify the nearest genes of differential peaks
+open_l23 <- rownames(da_peaks[da_peaks$p_val_adj < 0.5 & da_peaks$avg_log2FC >0,])
+closest_l23 <- ClosestFeature(NFYA, open_l23)
+write.table(closest_l23, "AllCM.WTKO.KOdownPeaks.anno.txt")
+
+##### find enriched motifs at the KO_low peaks
+enriched.motifs <- FindMotifs(
+  object = NFYA,
+  features = open_l23
+)
+MotifPlot(
+  object = NFYA,
+  motifs = head(rownames(enriched.motifs))
+)
+
+write.table(enriched.motifs, "AllCM.WTKO.KOdownPeaks.motif.txt")
+
+#### visualize the genes with reduced peaks in Nfya KO
+### Sod1 
+cov_plot <- CoveragePlot(
+  object = NFYA,
+  region = "chr16-90143594-90144523",
+  extend.upstream = 5000,
+  extend.downstream = 5000,
+  annotation = T,
+  peaks = T
+)
+cov_plot
+### Cox8a
+cov_plot <- CoveragePlot(
+  object = NFYA,
+  region = "chr4-114357133-114358015",
+  extend.upstream = 5000,
+  extend.downstream = 5000,
+  annotation = T,
+  peaks = T
+)
+cov_plot
+
+CoveragePlot(NFYA, 
+             region = 'Cox8a', 
+             features = 'Cox8a', 
+             assay = 'ATAC', 
+             expression.assay = 'SCT',
+             extend.upstream = 2000,
+             extend.downstream = 2000)
+
+CoveragePlot(NFYA, 
+             region = 'Nrf1', 
+             features = 'Nrf1', 
+             assay = 'ATAC', 
+             expression.assay = 'SCT',
+             extend.upstream = 2000,
+             extend.downstream = 2000)
+
+
+
+###### differential peaks analysis between cluster 0 and 2
+Idents(NFYA) <- "seurat_clusters"
+da_peaks <- FindMarkers(
+  object = NFYA,
+  ident.1 = "0",
+  ident.2 = "2",
+  min.pct = 0.05,
+  test.use = 'LR',
+)
+
+head(da_peaks)
+write.table(da_peaks, "Cluster0_2_Diff.Peaks.txt")
+
+#### visualize the top peaks
+cov_plot <- CoveragePlot(
+  object = NFYA,
+  region = "chr17-87174204-87175079",
+  extend.upstream = 1000,
+  extend.downstream = 1000,
+  annotation = T,
+  peaks = T
+)
+cov_plot
+
+
+
+###### differential peaks analysis between cluster 0_WT(1_1) and 0_KO(0_2)
+NFYA$celltype.stim <- paste(Idents(NFYA), NFYA$sample, sep = "_")
+Idents(NFYA) <- "celltype.stim"
+Idents(NFYA) <- "seurat_clusters"
+
+da_peaks <- FindMarkers(
+  object = NFYA,
+  ident.1 = "0_1",
+  ident.2 = "0_2",
+  min.pct = 0.05,
+  test.use = 'LR',
+  logfc.threshold = 0.01
+)
+
+head(da_peaks)
+write.table(da_peaks, "Cluster0_WTKO_Diff.Peaks.txt")
+
+#### visualize the top peaks
+CoveragePlot(
+  object = NFYA,
+  region = "chr8-122299620-122300527",
+  extend.upstream = 1000,
+  extend.downstream = 1000,
+  annotation = T,
+  peaks = T,
+  idents = c("0_1","0_2")
+)
+
+### identify the nearest genes of differential peaks
+open_l23 <- rownames(da_peaks[da_peaks$p_val < 0.01 & da_peaks$avg_log2FC >0,])
+closest_l23 <- ClosestFeature(NFYA, open_l23)
+write.table(closest_l23, "Cluster0.WTKO.KOdownPeaks.anno.txt")
+
+##### find enriched motifs at the KO_low peaks
+enriched.motifs <- FindMotifs(
+  object = NFYA,
+  features = open_l23
+)
+MotifPlot(
+  object = NFYA,
+  motifs = head(rownames(enriched.motifs))
+)
+
+write.table(enriched.motifs, "Cluster0.WTKO.KOdownPeaks.motif.txt")
+saveRDS(NFYA, file = "/Users/mcui/Documents/R-studio/NFYA_multiome_aggr/R/NFYA.motif.rds")
+NFYA <- readRDS(file = "/Users/mcui/Documents/R-studio/NFYA_multiome_aggr/R/NFYA.motif.rds")
+
+###### plot Brca1 expression
+Idents(NFYA) <- "seurat_clusters"
+VlnPlot(object = NFYA, features = c("Brca1"),pt.size  = 0, adjust=1, slot = "data",assay = "SCT")
+
+FeaturePlot(object = NFYA, features = c("Brca1","Birc5","Bcl2l2","Mre11a","Rad51"),max.cutoff = "100")
+
+
+#### differential motif enrichment analysis
+
+### CM4 heatmap
+DoHeatmap(object = CM,features = CM4Markers, size = 3, disp.max = 3, disp.min = -3)+ scale_fill_gradient2( low = rev(c('#d1e5f0','#67a9cf','#2166ac')), mid = "white", high = rev(c('#b2182b','#ef8a62','#fddbc7')), midpoint = 0, guide = "colourbar", aesthetics = "fill")
+DoHeatmap(object = CM,features = CM4Markers, size = 3, disp.max = 5, disp.min = 0)+ scale_fill_gradient2( low = rev(c('#d1e5f0','#67a9cf','#2166ac')), mid = "white", high = rev(c('#b2182b','#ef8a62','#fddbc7')), midpoint = 0, guide = "colourbar", aesthetics = "fill")
+DoHeatmap(object = CM,features = CM4Markers, size = 3, group.colors = c("red", "blue") )
+DefaultAssay(CM) <- "RNA"
+
+ATP.genes <- c("Atp5d","Atp5e", "Atp5b","Atp5g1","Atp5l","Atp5o","Atp5h")
+mito.genes <- c("Cox8a","Cox8b", "Cox6a2","Cox7c","Uqcrg","Uqcr10","Uqcrh")
+Glyco.genes <- c("Tpi1","Aldoa", "Pgk1","Eno1","Pgm2","Pgam2","Ldha","Ppia","Mdh2","Got1")
+DoHeatmap(object = CM, features = Glyco.genes, slot = "scale.data", size = 3, disp.max = 3, disp.min = -3)+ scale_fill_gradient2( low = rev(c('#d1e5f0','#67a9cf','#2166ac')), mid = "white", high = rev(c('#b2182b','#ef8a62','#fddbc7')), midpoint = 0, guide = "colourbar", aesthetics = "fill")
+VlnPlot(object = CM, features = ATP.genes,group.by = "CellType",pt.size  = 0, adjust=1)
+VlnPlot(object = CM, features = c("Atp5d","Atp5o","Atp5h","Cox8b","Cox6a2","Cox7c","Tpi1","Aldoa","Pgam2"),ncol=3,group.by = "CellType",pt.size  = 0, adjust=1)
+
+#### 2021.10.30
+#### export metadata of NFYA for Velocyto analysis
+setwd("/Users/mcui/Documents/R-studio/NFYA_multiome_aggr/R")
+DefaultAssay(NFYA) <- "SCT"
+### subset WT data
+WTCells <- rownames(NFYA@meta.data[NFYA@meta.data$sample =="1",])
+WT <- subset(NFYA, cells= WTCells)
+DimPlot(WT, label=T, group.by = "sample")
+
+write.csv(Cells(WT), file = "WT.cellID_obs.csv", row.names = FALSE)
+write.csv(Embeddings(WT, reduction = "umap.rna"), file = "WT.cell_embeddings.csv")
+write.csv(WT@meta.data$seurat_clusters, file = "WT.clusters.csv")
+
+### subset KO data
+KOCells <- rownames(NFYA@meta.data[NFYA@meta.data$sample =="2",])
+KO <- subset(NFYA, cells= KOCells)
+DimPlot(KO, label=T, group.by = "sample")
+
+write.csv(Cells(KO), file = "KO.cellID_obs.csv", row.names = FALSE)
+write.csv(Embeddings(KO, reduction = "umap.rna"), file = "KO.cell_embeddings.csv")
+write.csv(KO@meta.data$seurat_clusters, file = "KO.clusters.csv")
+
+
+####2021.10.31 rebame clusters
+DefaultAssay(NFYA) <- "SCT"
+Idents(NFYA) <- NFYA$seurat_clusters
+### remove cluster 14
+NFYA <-subset(NFYA, idents = 14, invert = TRUE)
+NFYA <- RenameIdents(NFYA, "0"="fetal","1"="binucleation","2"="FCM","3"="binucleation","4"="fetal","5"="binucleation","6"="less fetal","7"="less fetal","8"="less fetal","9"="less fetal","10"="less fetal","11"="binucleation","12"="binucleation","13"="less fetal","15"="less fetal","16"="less fetal","17"="binucleation","18" ="fetal")
+DimPlot(NFYA, reduction = "umap.rna", label = TRUE,cols = c('fetal'='#F68282','FCM'='#31C53F','binucleation'='#1FA195','less fetal'='#B95FBB'))
+DimPlot(NFYA, reduction = "umap.rna", label = TRUE,cols = c('fetal'='#D4D915','FCM'='#28CECA','binucleation'='#ff9a36','less fetal'='#2FF18B'))
+DimPlot(NFYA, reduction = "umap.rna", label = TRUE,cols = c('fetal'='#aeadb3','FCM'='#faf4cf','binucleation'='#CCB1F1','less fetal'='#25aff5'))
+DimPlot(NFYA, reduction = "umap.rna", label = TRUE,cols = c('fetal'='#A4DFF2','FCM'='#4B4BF7','binucleation'='#AC8F14','less fetal'='#E6C122'))
+
+DimPlot(NFYA, reduction = "umap.rna", label = TRUE,cols = c('fetal'='#25aff5','FCM'='#31C53F','binucleation'='#ff9a36','less fetal'='#CCB1F1'))
+saveRDS(NFYA, file = "/Users/mcui/Documents/R-studio/NFYA_multiome_aggr/R/NFYA.motif.cluster.rds")
+NFYA <- readRDS(file = "/Users/mcui/Documents/R-studio/NFYA_multiome_aggr/R/NFYA.motif.cluster.rds")
+#### export metadata of NFYA for Velocyto analysis
+### subset WT data
+WTCells <- rownames(NFYA@meta.data[NFYA@meta.data$sample =="1",])
+WT <- subset(NFYA, cells= WTCells)
+DimPlot(WT, label=T)
+WT$celltype <- Idents(NFYA)
+write.csv(Cells(WT), file = "WT.cellID_obs.new.csv", row.names = FALSE)
+write.csv(Embeddings(WT, reduction = "umap.rna"), file = "WT.cell_embeddings.new.csv")
+write.csv(WT@meta.data$celltype, file = "WT.clusters.new.csv")
+#### find makrers for each renamed identity
+Markers <- FindAllMarkers(NFYA, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+write.table(Markers, "NFYA_markers.txt")
+FeaturePlot(object = NFYA, features = c("Myl2"),max.cutoff = "100")
+### heatmap for marker genes
+Markers %>%
+  group_by(cluster) %>%
+  top_n(n = 50, wt = avg_log2FC) -> top50
+DoHeatmap(NFYA, features = top50$gene) + NoLegend()
+DoHeatmap(NFYA,features = top50$gene, size = 3, disp.max = 3, disp.min = -3, group.colors = c('fetal'='#25aff5','FCM'='#31C53F','binucleation'='#ff9a36','less fetal'='#CCB1F1'))+ scale_fill_gradient2( low = rev(c('#d1e5f0','#67a9cf','#2166ac')), mid = "white", high = rev(c('#b2182b','#ef8a62','#fddbc7')), midpoint = 0, guide = "colourbar", aesthetics = "fill")
+DoHeatmap(NFYA,features = top50$gene, size = 3, disp.max = 5, disp.min = 0)+ scale_fill_gradient2( low = rev(c('#d1e5f0','#67a9cf','#2166ac')), mid = "white", high = rev(c('#b2182b','#ef8a62','#fddbc7')), midpoint = 0, guide = "colourbar", aesthetics = "fill")
+DoHeatmap(NFYA,features = top50$gene, size = 3, group.colors = c("red", "blue") )
+DEG <- FindMarkers(NFYA, ident.1 ="less fetal", ident.2 = "binucleation",verbose = TRUE ) 
+write.table(DEG, "LessFetal_binucleation.DEG.txt")
+
+### 2022.08.07
+### trabecular markers
+FeaturePlot(object = NFYA, features = c("Nppa","Gja1","Mest","Kdr","Gja5"),max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Nppa"), split.by="sample",max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Gja1"), split.by="sample",max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Mest"), split.by="sample",max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Kdr"), split.by="sample",max.cutoff = "100")
+FeaturePlot(object = NFYA, features = c("Gja5"), split.by="sample",max.cutoff = "100")
+
+#########~~redo of looking at peaks associated with conserved human/mouse genes and motif analysis######################################################################
+
+
+overlap_Myo3_and_CM4_genes_with_Miaos_notes <- read_excel("comparison between species analysis/overlap Myo3 and CM4 genes with Miaos notes.xlsx", 
+                                                          +     col_names = FALSE)
+conserved_genes <- overlap_Myo3_and_CM4_genes_with_Miaos_notes$...1
+
+# Get the gene coordinates from Seurat
+genes_coordinates <- rownames(Myo_multi[["RNA"]])[rownames(Myo_multi[["RNA"]]) %in% conserved_genes]
+
+# Get the gene annotation (TSS positions) from your Seurat object
+# Assuming you have the gene annotation in 'gr' format (GenomicRanges object)
+gene_annotation <- Annotation(Myo_multi)
+
+# Filter out the TSS regions based on your genes of interest
+tss_regions <- gene_annotation[gene_annotation$gene_name %in% conserved_genes]
