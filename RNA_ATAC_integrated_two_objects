@@ -48,10 +48,10 @@ D$origin <-paste(D$orig.ident, D$sample, sep = "_")
 L$origin <-paste(L$orig.ident, L$sample, sep = "_")
 
 
+
 # Convert rownames of ATAC matrix to GRanges
 grange.counts.D <- StringToGRanges(rownames(atac_counts.D), sep = c(":", "-"))
 grange.counts.L <- StringToGRanges(rownames(atac_counts.L), sep = c(":", "-"))
-
 
 # Keep peaks only on standard chromosomes
 grange.use.D <- seqnames(grange.counts.D) %in% standardChromosomes(grange.counts.D)
@@ -62,33 +62,78 @@ atac_counts.L <- atac_counts.L[as.vector(grange.use.L), ]
 
 # Load mouse genome annotations
 annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
-seqlevelsStyle(annotations) <- "UCSC"  # Ensure correct chromosome naming
+seqlevelsStyle(annotations) <- "UCSC"  # Ensure UCSC chromosome naming
+
+# Ensure genome is set consistently
 genome(annotations) <- "mm10"
+
+## Convert rownames of ATAC matrix to GRanges
+#grange.counts.D <- StringToGRanges(rownames(atac_counts.D), sep = c(":", "-"))
+#grange.counts.L <- StringToGRanges(rownames(atac_counts.L), sep = c(":", "-"))
+
+## Ensure genome is set for grange objects
+#genome(grange.counts.D) <- "mm10"
+#genome(grange.counts.L) <- "mm10"
+
+## Keep peaks only on standard chromosomes
+#grange.use.D <- seqnames(grange.counts.D) %in% standardChromosomes(grange.counts.D)
+#grange.use.L <- seqnames(grange.counts.L) %in% standardChromosomes(grange.counts.L)
 
 # Create Fragment Objects
 fragments.D <- CreateFragmentObject(path = "D:/Doa_Multiome/atac_fragments.tsv.gz", cells = colnames(D))
-fragments.L <- CreateFragmentObject(path = "D:/filtered_feature_bc_matrix/atac_fragments.tsv.gz", cells = colnames(L))
+fragments.L <- CreateFragmentObject(path = "D:/atac_fragments.tsv.gz", cells = colnames(L))
+
+# Ensure genome consistency for fragment objects
+#genome(fragments.D) <- "mm10"
+#genome(fragments.L) <- "mm10"
 
 # Create Chromatin Assays
 chrom_assay.D <- CreateChromatinAssay(
   counts = atac_counts.D,
   sep = c(":", "-"),
   genome = "mm10",
+  min.cells = 10,
   fragments = fragments.D,
   annotation = annotations
 )
+
 
 chrom_assay.L <- CreateChromatinAssay(
   counts = atac_counts.L,
   sep = c(":", "-"),
   genome = "mm10",
+  min.cells = 10,
   fragments = fragments.L,
   annotation = annotations
 )
 
+
+
+
 # Add ATAC data to Seurat objects
 D[["ATAC"]] <- chrom_assay.D
 L[["ATAC"]] <- chrom_assay.L
+
+#If you get the following error:
+# D[["ATAC"]] <- chrom_assay.D
+#Error in `[[<-`:
+#! Cannot add new cells with [[<-
+#Run `rlang::last_trace()` to see where the error occurred.
+#This This error usually happens when chrom_assay.D contains more cells than D, and Seurat does not allow adding new cells to an existing object.
+#Do the following
+
+# Check the Number of Cells in Each Object
+length(colnames(D))  # Number of cells in the Seurat object
+length(colnames(chrom_assay.D))  # Number of cells in the ChromatinAssay
+#Subset chrom_assay.D to Match D
+cells.use <- colnames(D)  # Get only the cells present in D
+chrom_assay.D <- subset(chrom_assay.D, cells = cells.use)
+#After that try adding again
+D[["ATAC"]] <- chrom_assay.D
+
+
+
+
 
 DefaultAssay(D) <- "ATAC"
 D <- NucleosomeSignal(D)
