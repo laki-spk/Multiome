@@ -15,19 +15,23 @@ library(EnsDb.Mmusculus.v79)
 inputdata.D <- Read10X_h5("D:/Doa_Multiome/filtered_feature_bc_matrix.h5")
 inputdata.L <- Read10X_h5("D:/filtered_feature_bc_matrix.h5")
 
+
 # Extract RNA and ATAC data
 rna_counts.D <- inputdata.D$`Gene Expression`
 rna_counts.L <- inputdata.L$`Gene Expression`
 atac_counts.D <- inputdata.D$`Peaks`
 atac_counts.L <- inputdata.L$`Peaks`
 
+
 # Create Seurat objects for RNA
 D <- CreateSeuratObject(counts = rna_counts.D, project = "D")
 L <- CreateSeuratObject(counts = rna_counts.L, project = "L")
 
+
 # Annotate mitochondrial genes for mouse
 D[["percent.mt"]] <- PercentageFeatureSet(D, pattern = "^mt-")
 L[["percent.mt"]] <- PercentageFeatureSet(L, pattern = "^mt-")
+
 
 # Filter RNA data
 VlnPlot(D, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
@@ -35,9 +39,19 @@ D <- subset(D, subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 
 VlnPlot(L, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
 L <- subset(L, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
 
+
+#Add and rename columns
+D$sample <- sub(".*-(\\d+)$", "\\1", rownames(D@meta.data))
+L$sample <- sub(".*-(\\d+)$", "\\1", rownames(L@meta.data))
+
+D$origin <-paste(D$orig.ident, D$sample, sep = "_")
+L$origin <-paste(L$orig.ident, L$sample, sep = "_")
+
+
 # Convert rownames of ATAC matrix to GRanges
 grange.counts.D <- StringToGRanges(rownames(atac_counts.D), sep = c(":", "-"))
 grange.counts.L <- StringToGRanges(rownames(atac_counts.L), sep = c(":", "-"))
+
 
 # Keep peaks only on standard chromosomes
 grange.use.D <- seqnames(grange.counts.D) %in% standardChromosomes(grange.counts.D)
