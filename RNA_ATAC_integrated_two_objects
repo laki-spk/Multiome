@@ -1,0 +1,134 @@
+library(Signac)
+library(Seurat)
+library(SeuratDisk)
+library(SeuratWrappers)
+library(EnsDb.Mmusculus.v79)  # Mouse annotation
+library(ggplot2)
+library(dplyr)
+library(harmony)
+library(GenomicRanges)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(EnsDb.Mmusculus.v79)
+
+
+# Load hdf5 files from CellRanger for both datasets
+inputdata.D <- Read10X_h5("D:/Doa_Multiome/filtered_feature_bc_matrix.h5")
+inputdata.L <- Read10X_h5("D:/filtered_feature_bc_matrix.h5")
+
+# Extract RNA and ATAC data
+rna_counts.D <- inputdata.D$`Gene Expression`
+rna_counts.L <- inputdata.L$`Gene Expression`
+atac_counts.D <- inputdata.D$`Peaks`
+atac_counts.L <- inputdata.L$`Peaks`
+
+# Create Seurat objects for RNA
+D <- CreateSeuratObject(counts = rna_counts.D, project = "D")
+L <- CreateSeuratObject(counts = rna_counts.L, project = "L")
+
+# Annotate mitochondrial genes for mouse
+D[["percent.mt"]] <- PercentageFeatureSet(D, pattern = "^mt-")
+L[["percent.mt"]] <- PercentageFeatureSet(L, pattern = "^mt-")
+
+# Filter RNA data
+D <- subset(D, subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 5)
+L <- subset(L, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+
+# Convert rownames of ATAC matrix to GRanges
+grange.counts.D <- StringToGRanges(rownames(atac_counts.D), sep = c(":", "-"))
+grange.counts.L <- StringToGRanges(rownames(atac_counts.L), sep = c(":", "-"))
+
+# Keep peaks only on standard chromosomes
+grange.use.D <- seqnames(grange.counts.D) %in% standardChromosomes(grange.counts.D)
+grange.use.L <- seqnames(grange.counts.L) %in% standardChromosomes(grange.counts.L)
+
+atac_counts.D <- atac_counts.D[as.vector(grange.use.D), ]
+atac_counts.L <- atac_counts.L[as.vector(grange.use.L), ]
+
+# Load mouse genome annotations
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+seqlevelsStyle(annotations) <- "UCSC"  # Ensure correct chromosome naming
+genome(annotations) <- "mm10"
+
+# Create Fragment Objects
+fragments.D <- CreateFragmentObject(path = "D:/Doa_Multiome/atac_fragments.tsv.gz", cells = colnames(D))
+fragments.L <- CreateFragmentObject(path = "D:/filtered_feature_bc_matrix/atac_fragments.tsv.gz", cells = colnames(L))
+
+# Create Chromatin Assays
+chrom_assay.D <- CreateChromatinAssay(
+  counts = atac_counts.D,
+  sep = c(":", "-"),
+  genome = "mm10",
+  fragments = fragments.D,
+  annotation = annotations
+)
+
+chrom_assay.L <- CreateChromatinAssay(
+  counts = atac_counts.L,
+  sep = c(":", "-"),
+  genome = "mm10",
+  fragments = fragments.L,
+  annotation = annotations
+)
+
+# Add ATAC data to Seurat objects
+D[["ATAC"]] <- chrom_assay.D
+L[["ATAC"]] <- chrom_assay.L
+
+DefaultAssay(D) <- "ATAC"
+D <- NucleosomeSignal(D)
+D <- TSSEnrichment(D)
+DefaultAssay(L) <- "ATAC"
+L <- NucleosomeSignal(L)
+L <- TSSEnrichment(L)
+
+# Apply ATAC-based filtering
+D <- subset(D, subset = nCount_ATAC > 100 & nCount_ATAC < 100000 & TSS.enrichment > 1 & nucleosome_signal < 4)
+L <- subset(L, subset = nCount_ATAC > 100 & nCount_ATAC < 100000 & TSS.enrichment > 1 & nucleosome_signal < 4)
+
+D <- SCTransform(D, verbose = FALSE)
+L <- SCTransform(L, verbose = FALSE)
+
+D <- FindVariableFeatures(D, selection.method = "vst", nfeatures = 3000)
+L <- FindVariableFeatures(L, selection.method = "vst", nfeatures = 3000)
+
+# Find integration anchors
+anchors <- FindIntegrationAnchors(object.list = list(D, L), normalization.method = "SCT", dims = 1:30)
+Multi <- IntegrateData(anchorset = anchors, normalization.method = "SCT", dims = 1:30)
+
+# Run PCA on integrated RNA
+DefaultAssay(Multi) <- "integrated"
+Multi <- RunPCA(Multi)
+
+# Run Harmony for batch correction
+Multi <- RunHarmony(Multi, group.by.vars = "orig.ident")  
+
+#Process ATAC data
+DefaultAssay(Multi) <- "ATAC"
+Multi <- RunTFIDF(Multi)
+Multi <- FindTopFeatures(Multi, min.cutoff = 'q0')
+Multi <- RunSVD(Multi)
+
+#Check if barcodes are mismatched after integration
+head(colnames(Multi[["RNA"]]))
+head(colnames(Multi[["ATAC"]]))
+
+#Rename RNA barcodes to match ATAC before proceeding:
+colnames(Multi[["RNA"]]) <- gsub("_\\d+$", "", colnames(Multi[["RNA"]]))
+
+#Verify that both assays now share the same cell names:
+all(colnames(Multi[["RNA"]]) == colnames(Multi[["ATAC"]]))  # Should return TRUE
+
+
+# Find multimodal neighbors
+Multi <- FindMultiModalNeighbors(Multi, reduction.list = list("pca", "lsi"), dims.list = list(1:50, 2:50))
+
+# Run UMAP
+Multi <- RunUMAP(Multi, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+
+# Find Clusters
+Multi <- FindClusters(Multi, graph.name = "wsnn", algorithm = 3, resolution = 1)
+
+# Plot WNN clusters
+DimPlot(Multi, reduction = "wnn.umap", label = TRUE, repel = TRUE) + ggtitle("WNN Clustering")
+
+save(Multi, file = "D:/Doa_Multiome/Multi_preprocessed.RData")
