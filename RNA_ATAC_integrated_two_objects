@@ -143,11 +143,19 @@ L <- NucleosomeSignal(L)
 L <- TSSEnrichment(L)
 
 # Apply ATAC-based filtering
+VlnPlot(D, features = c("nCount_ATAC", "TSS.enrichment","nucleosome_signal"), ncol = 3,
+        log = TRUE, pt.size = 0) + NoLegend()
 D <- subset(D, subset = nCount_ATAC > 100 & nCount_ATAC < 100000 & TSS.enrichment > 1 & nucleosome_signal < 4)
+VlnPlot(L, features = c("nCount_ATAC", "TSS.enrichment","nucleosome_signal"), ncol = 3,
+        log = TRUE, pt.size = 0) + NoLegend()
 L <- subset(L, subset = nCount_ATAC > 100 & nCount_ATAC < 100000 & TSS.enrichment > 1 & nucleosome_signal < 4)
 
-D <- SCTransform(D, verbose = FALSE)
-L <- SCTransform(L, verbose = FALSE)
+
+#SCTransform to both datasets individually before identifying the integration anchors. This normalization method accounts for differences in sequencing depth and variance across datasets. It's particularly useful for RNA-seq data and works well when we're also working with ATAC-seq data, since it helps reduce batch effects and makes the data from both modalities more comparable.
+# FindIntegrationAnchors: By setting normalization.method = "SCT", we're telling the integration step to use the SCTransform normalization for both datasets, ensuring consistency in how the data are scaled and compared across modalities
+
+D <- SCTransform(D, vars.to.regress = "percent.mt", verbose = FALSE)
+L <- SCTransform(L, vars.to.regress = "percent.mt", verbose = FALSE)
 
 D <- FindVariableFeatures(D, selection.method = "vst", nfeatures = 3000)
 L <- FindVariableFeatures(L, selection.method = "vst", nfeatures = 3000)
