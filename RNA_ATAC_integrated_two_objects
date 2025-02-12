@@ -30,7 +30,9 @@ D[["percent.mt"]] <- PercentageFeatureSet(D, pattern = "^mt-")
 L[["percent.mt"]] <- PercentageFeatureSet(L, pattern = "^mt-")
 
 # Filter RNA data
+VlnPlot(D, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
 D <- subset(D, subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 5)
+VlnPlot(L, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
 L <- subset(L, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
 
 # Convert rownames of ATAC matrix to GRanges
