@@ -224,3 +224,25 @@ VlnPlot(CM_cells, features = rownames(top_genes)
 
 # Run Louvain clustering (resolution is a tuning parameter)
 CM_cells <- FindClusters(CM_cells, resolution = 0.5, algorithm = 1)  # algorithm = 1 is Louvain
+
+# Define the sample pairs for comparison
+comparisons <- list(
+  c("D4", "D28"),
+  c("D4", "A24"),
+  c("D4", "A4T"),
+  c("D4", "A18"),
+  c("A18", "A24"),
+  c("A18", "A4T"),
+  c("A24", "A4T")
+)
+
+# Loop through each pair and generate a DimPlot
+for (pair in comparisons) {
+  subset_cells <- subset(CM_cells, subset = origin %in% pair)  # Subset by origin
+  p <- DimPlot(subset_cells, reduction = "umap", group.by = "origin", label = TRUE, pt.size = 0.5) +
+    ggtitle(paste(pair[1], "vs", pair[2])) +
+    theme_minimal()
+  
+  print(p)  # Display the plot
+}
+
