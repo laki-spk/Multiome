@@ -126,3 +126,101 @@ Multi@meta.data <- Multi@meta.data %>%
                          "L_1" = "A18",
                          "L_2" = "A4T",
                          "L_3" = "A24"))
+
+#To transfer celltypes to seurat meta data;
+celltype <- Multi@active.ident
+
+Multi@meta.data$celltype <- celltype
+
+# Save your Seurat object to an RDS file
+saveRDS(Multi, file = "Multi.rds")
+
+
+# Subset Multi Seurat object for CM cell type
+CM_cells <- subset(Multi, idents = "CM")
+
+# Visualize or summarize the CM cells by sample
+table(CM_cells$origin)
+
+library(ggplot2)
+
+# Subset Multi Seurat object for CM cell type
+CM_cells <- subset(Multi, idents = "CM")
+
+# Visualize or summarize the CM cells by sample
+table(CM_cells$origin)
+
+library(ggplot2)
+
+# Create a data frame for plotting
+CM_metadata <- CM_cells@meta.data
+
+# Plot the distribution of CM cells across samples
+ggplot(CM_metadata, aes(x = origin)) +
+  geom_bar() +
+  theme_minimal() +
+  labs(title = "Distribution of CM Cells by origin", x = "origin", y = "Count")
+
+DimPlot(CM_cells, reduction = "umap", group.by = "origin", label = TRUE, pt.size = 0.5)
+
+# Set the identity class to 'origin' if it contains the D28 information
+CM_cells <- SetIdent(CM_cells, value = "origin")
+CM_cells <- PrepSCTFindMarkers(CM_cells)
+# Find markers for the aged and disease clusters compared to D4 (Adult2)
+aged_genes <- FindMarkers(CM_cells, 
+                                  ident.1 = "D28", 
+                                  ident.2 = "D4", 
+                                  min.pct = 0.25, 
+                                  logfc.threshold = 0.25)
+
+write.csv(aged_genes, file = "aged_genes_D28.csv")
+
+mid_aged_genes <- FindMarkers(CM_cells, 
+                          ident.1 = "A24", 
+                          ident.2 = "D4", 
+                          min.pct = 0.25, 
+                          logfc.threshold = 0.25)
+
+write.csv(mid_aged_genes, file = "aged_genes_A24.csv")
+
+diseased_genes <- FindMarkers(CM_cells, 
+                              ident.1 = "A4T", 
+                              ident.2 = "D4", 
+                              min.pct = 0.25, 
+                              logfc.threshold = 0.25)
+write.csv(diseased_genes, file = "aged_genes_A4T.csv")
+
+adult18_genes <- FindMarkers(CM_cells, 
+                              ident.1 = "A18", 
+                              ident.2 = "D4", 
+                              min.pct = 0.25, 
+                              logfc.threshold = 0.25)
+write.csv(adult18_genes, file = "aged_genes_A18.csv")
+
+# Identify top 10 highly expressed genes from the `aged_genes` results
+top_genes <- head(aged_genes[order(aged_genes$avg_log2FC, decreasing = TRUE), ], 10)
+
+# Plot these top genes as a violin plot
+VlnPlot(CM_cells, features = rownames(top_genes))
+
+# Identify top 10 highly expressed genes from the `mid_aged_genes` results
+top_genes <- head(mid_aged_genes[order(mid_aged_genes$avg_log2FC, decreasing = TRUE), ], 10)
+
+# Plot these top genes as a violin plot
+VlnPlot(CM_cells, features = rownames(top_genes))
+
+# Identify top 10 highly expressed genes from the `adult18_genes` results
+top_genes <- head(adult18_genes[order(adult18_genes$avg_log2FC, decreasing = TRUE), ], 10)
+
+# Plot these top genes as a violin plot
+VlnPlot(CM_cells, features = rownames(top_genes))
+
+# Identify top 10 highly expressed genes from the `diseased_genes` results
+top_genes <- head(diseased_genes[order(diseased_genes$avg_log2FC, decreasing = TRUE), ], 10)
+
+# Plot these top genes as a violin plot
+VlnPlot(CM_cells, features = rownames(top_genes)
+
+
+# Run Louvain clustering (resolution is a tuning parameter)
+CM_cells <- FindClusters(CM_cells, resolution = 0.5, algorithm = 1)  # algorithm = 1 is Louvain
