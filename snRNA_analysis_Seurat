@@ -246,3 +246,33 @@ for (pair in comparisons) {
   print(p)  # Display the plot
 }
 
+
+
+CM_cells <- subset(Merged, idents = "CM")
+# Set the identities to the 'origin' column
+Idents(CM_cells) <- "origin"
+# Join the RNA and any other layers (if applicable)
+CM_cells[["RNA"]] <- JoinLayers(CM_cells[["RNA"]])
+
+deg_D28_vs_D4 <- FindMarkers(CM_cells, 
+                             ident.1 = "D28", 
+                             ident.2 = "D4", 
+                             logfc.threshold = 0.25, 
+                             min.pct = 0.1)
+
+deg_A4T_vs_D4 <- FindMarkers(CM_cells, 
+                             ident.1 = "A4T", 
+                             ident.2 = "D4", 
+                             logfc.threshold = 0.25, 
+                             min.pct = 0.1)
+
+deg_A24_vs_D4 <- FindMarkers(CM_cells, 
+                             ident.1 = "A24", 
+                             ident.2 = "D4", 
+                             logfc.threshold = 0.25, 
+                             min.pct = 0.1)
+
+# Save DEG results to CSV files
+write.csv(deg_D28_vs_D4, file = "D28_vs_D4_DEGs.csv")
+write.csv(deg_A4T_vs_D4, file = "A4T_vs_D4_DEGs.csv")
+write.csv(deg_A4T_vs_D4, file = "A24_vs_D4_DEGs.csv")
