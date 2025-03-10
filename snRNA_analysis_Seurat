@@ -250,6 +250,23 @@ write.csv(deg_A4T_vs_D4, file = "A4T_vs_D4_DEGs.csv")
 write.csv(deg_A24_vs_D4, file = "A24_vs_D4_DEGs.csv")
 write.csv(deg_Neo_vs_D4, file = "Neo_vs_D4_DEGs.csv")
 
+---------------------------------------------------------------------------------------------------------------------
 
+# Subset CM_cells Seurat object to include only the samples of interest
+samples_of_interest <- c("A24", "A4T", "Neo", "D28", "D4")
 
+CM_cells_subset <- subset(CM_cells, subset = origin %in% samples_of_interest)
+
+# Create a comparison plot of A24 vs D4 in UMAP
+CM_cells_A24_vs_D4 <- subset(CM_cells_subset, idents = c("A24", "D4"))
+DimPlot(CM_cells_A24_vs_D4, group.by = "origin", label = TRUE, pt.size = 1)
+
+CM_cells_A4T_vs_D4 <- subset(CM_cells_subset, idents = c("A4T", "D4"))
+DimPlot(CM_cells_A4T_vs_D4, group.by = "origin", label = TRUE, pt.size = 1)
+
+CM_cells_D28_vs_D4 <- subset(CM_cells_subset, idents = c("D28", "D4"))
+DimPlot(CM_cells_D28_vs_D4, group.by = "origin", label = TRUE, pt.size = 1)
+
+CM_cells_Neo_vs_D4 <- subset(CM_cells_subset, idents = c("Neo", "D4"))
+DimPlot(CM_cells_Neo_vs_D4, group.by = "origin", label = TRUE, pt.size = 1)
 
