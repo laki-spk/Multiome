@@ -21,64 +21,145 @@ rna_counts.D <- inputdata.D$`Gene Expression`
 rna_counts.L <- inputdata.L$`Gene Expression`
 
 # Create Seurat objects
-D <- CreateSeuratObject(counts = rna_counts.D)
-L <- CreateSeuratObject(counts = rna_counts.L)
+D <- CreateSeuratObject(counts = rna_counts.D, project = "D")
+L <- CreateSeuratObject(counts = rna_counts.L, project = "L")
 
 # Add mitochondrial percentage
 D[["percent.mt"]] <- PercentageFeatureSet(D, pattern = "^mt-")
 L[["percent.mt"]] <- PercentageFeatureSet(L, pattern = "^mt-")
+---------------------------------------------------------------------------------------------------------------------------
 
+sample_pal <- c("#006D2C", "#1D91C0", "#FEB24C", "#E31A1C",  "#800000")
+
+names(sample_pal) <- c(
+  "E", "N", "A4T", "A18", "A24") 
+
+cell_pal <- c("#66C2A4", "#006D2C", "#1D91C0","#225EA8","#081D58","#f79736", "#E31A1C", "#800000" )
+
+names(dcell_pal) <- c(
+  "CM", "EC", "FB", "MACRO", "PERI", "IC", "SMC") 
+
+# Plot Percent of mitochondrial genes by Sample
+VlnPlot(Merged,
+        group.by = "origin",
+        features = "percent.mt",
+        # log = TRUE,
+        pt.size = 0, 
+) +
+  NoLegend() +
+  scale_fill_manual(values = sample_pal)
+
+VlnPlot(Merged,
+        group.by = "origin",
+        features = "perc.ribo",
+        # log = TRUE,
+        pt.size = 0, 
+) +
+  NoLegend() +
+  scale_fill_manual(values = sample_pal)
+
+VlnPlot(Merged,
+        group.by = "origin",
+        features = "perc.hb",
+        # log = TRUE,
+        pt.size = 0, 
+) +
+  NoLegend() +
+  scale_fill_manual(values = sample_pal)
+
+# Plot features by Sample together
+VlnPlot(Merged,
+        group.by = "origin",
+        features = c("percent.mt", "perc.ribo", "perc.hb"),
+        # log = TRUE,
+        pt.size = 0
+) &
+  NoLegend() &
+  scale_fill_manual(values = sample_pal)
+
+# Comparison of mitochondrial and hemoglobin genes
+p1 <- Merged@meta.data %>%
+  ggplot(., aes(x = percent.mt, y = perc.hb, color = celltype)) +
+  geom_point() +
+  scale_color_manual(values = pal) +
+  theme_classic()
+p2 <- Merged@meta.data %>%
+  ggplot(., aes(x = percent.mt, y = perc.hb, color = `origin`)) +
+  geom_point() +
+  scale_color_manual(values = sample_pal) +
+  theme_classic() 
+p1 | p2
+
+# Percent Mitochondrial Genes
+Merged@meta.data %>%
+  ggplot(., aes(x = nCount_RNA, y = nFeature_RNA, color = percent.mt)) +
+  geom_point() +
+  theme_classic() +
+  scale_color_gradient(low = "yellow", high = "red")
+
+# Percent MT Genes per sample
+Merged@meta.data %>%
+  ggplot(., aes(x = nCount_RNA, y = nFeature_RNA, color = percent.mt)) +
+  geom_point() +
+  facet_wrap(~`origin`) +
+  theme_classic() +
+  scale_color_gradient(low = "yellow", high = "red") +
+  scale_x_continuous(
+    labels = scales::unit_format(unit = "K", scale = 1e-3))
+
+# Plot by cell type
+Merged@meta.data %>%
+  ggplot(., aes(x = nCount_RNA, y = nFeature_RNA, color = celltype)) +
+  geom_point() +
+  theme_classic() + 
+  scale_color_manual(values = pal)
+-----------------------------------------------------------------------------------------------------------------------------
 # Perform QC filtering
+VlnPlot(D, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(L, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
 D <- subset(D, subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 5)
 L <- subset(L, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+----------------------------------------------------------------------------------------------------------------------------
+#Integrate objects
+Merged <- merge(D, y = L)
+#or if you have a list: Merged <- merge(D, y = list(N, A, O))
 
-# Normalize and identify variable features for integration
-D <- NormalizeData(D)
-L <- NormalizeData(L)
-D <- FindVariableFeatures(D, selection.method = "vst", nfeatures = 3000)
-L <- FindVariableFeatures(L, selection.method = "vst", nfeatures = 3000)
+Merged <- RunHarmony(Merged, group.by.vars = "orig.ident")
 
-# Identify integration anchors and integrate datasets
-anchors <- FindIntegrationAnchors(object.list = list(D, L), dims = 1:30)
-Multi <- IntegrateData(anchorset = anchors, dims = 1:30)
+---------------------------------------------------------------------------------------------------------------------------
+Merged <- Merged %>%
+   NormalizeData(verbose = FALSE) %>%
+   FindVariableFeatures(method = "vst", nfeatures = 3000, verbose = FALSE) %>%
+   ScaleData(verbose = FALSE, features = VariableFeatures(.)) %>%
+   RunPCA(verbose = FALSE) %>%
+   RunHarmony(group.by.vars = "orig.ident", plot_convergence = TRUE) %>%  # Apply Harmony
+   FindNeighbors(dims = 1:10, reduction = "harmony") %>%  # Use Harmony reduction
+   FindClusters(resolution = 0.5) %>%
+   RunUMAP(dims = 1:10, reduction = "harmony")  # Use Harmony reduction for UMAP
 
-# Set the default assay and run SCTransform
-DefaultAssay(Multi) <- "integrated"
-Multi <- SCTransform(Multi, vars.to.regress = "percent.mt", verbose = FALSE)
+saveRDS(Merged, file = "Merged.rds")
 
-# Run PCA
-Multi <- RunPCA(Multi)
+-------------------------------------------------------------------------------------------------------------------------
+#Annotations
 
-# Run Harmony for batch correction
-Multi <- RunHarmony(Multi, group.by.vars = "batch")
-
-# Run neighbors, clusters, and UMAP
-Multi <- FindNeighbors(Multi, reduction = "harmony", dims = 1:30)
-Multi <- FindClusters(Multi, resolution = 1)
-Multi <- RunUMAP(Multi, reduction = "harmony", dims = 1:30)
-
-# Plot UMAP
-DimPlot(Multi, reduction = "umap", label = TRUE, repel = TRUE) + ggtitle("Integrated UMAP with Harmony")
-
+#individual clusters
+DimPlot(Merged, reduction = "umap")
 marker_genes <- list(
-  CM = c("Tnnt2", "Actc1", "Myh6", "Myh7", "Myl2", "Myl7"),
-  EC = c("Pecam1", "Cdh5", "Vegfa", "Kdr", "Nos3"),
-  SMC = c("Acta2", "Tagln", "Myh11", "Smtn"),
-  FB = c("Col1a1", "Col3a1", "Postn", "Dcn", "Tcf21"),
-  Macro = c("Adgre1", "Cd68", "Itgam", "Csf1r", "Mrc1"),
-  B_cells = c("Cd19", "Cd79a", "Ms4a1"),   
-  T_cells = c("Cd3e", "Cd4", "Cd8a", "Il7r"),
-  Meso = c("Msln", "Wt1"),
-  Pericytes = c("Pdgfrb", "Cspg4", "Anpep"),
-  Mono = c("Cd14", "Ms4a7"),
-  NK = c("Nkg7"),
-  DC = c("Cst3")
-)
-
-
-DotPlot(Multi, features = marker_genes) + 
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
+   CM = c("Tnnt2", "Actc1", "Myh6", "Myh7", "Myl2", "Myl7"),
+   EC = c("Pecam1", "Cdh5", "Vegfa", "Kdr", "Nos3"),
+   SMC = c("Acta2", "Tagln", "Myh11", "Smtn"),
+   FB = c("Col1a1", "Col3a1", "Postn", "Dcn", "Tcf21"),
+   Macro = c("Adgre1", "Cd68", "Itgam", "Csf1r", "Mrc1"),
+   B_cells = c("Cd19", "Cd79a", "Ms4a1"),   
+   T_cells = c("Cd3e", "Cd4", "Cd8a", "Il7r"),
+   Meso = c("Msln", "Wt1"),
+   Pericytes = c("Pdgfrb", "Cspg4", "Anpep"),
+   Mono = c("Cd14", "Ms4a7"),
+   NK = c("Nkg7"),
+   DC = c("Cst3")
+ )
+DotPlot(Merged, features = marker_genes) + 
+   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 # Plot violin plots for marker genes
 for (celltype in names(marker_genes)) {
@@ -106,152 +187,36 @@ vln_plot <- VlnPlot(Multi, features = paste0(names(marker_genes), "1"),
 ggsave("ModuleScores_ViolinPlot.png", plot = vln_plot, width = 12, height = 6, dpi = 300)
 
 
-new.cluster.ids <- c("EC", "CM", "CM", "CM", "FB", "Macro", "CM", "CM", "Peri", "EC", "EC", "CM", "CM", "FB", "FB", "CM", "FB", "CM", "B_cells", "Macro", "Macro", "EC", "T", "Macro", "Peri", "CM", "EC", "Meso", "CM", "CM", "CM", "EC", "SMC", "FB", "CM")
-names(new.cluster.ids) <- levels(Multi)
-Multi <- RenameIdents(Multi, new.cluster.ids)
-DimPlot(Multi, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
 
-DimPlot(Multi, reduction = "umap", group.by = "origin", label = TRUE, pt.size = 0.5)
+DimPlot(Merged, reduction = "umap", label = TRUE)
 
-Multi$origin <- paste(Multi$orig.ident, Multi$sample, sep = "_")
+Merged$sample <- sub(".*-(\\d+)_.*", "\\1", rownames(Merged@meta.data))
 
+Merged$origin <- paste(Merged$orig.ident, Merged$sample, sep = "_")
 
+Merged@meta.data <- Merged@meta.data %>%
+   mutate(origin = recode(origin, 
+                          "D_1" = "D4",
+                          "D_2" = "D4",
+                          "D_3" = "D28",
+                          "D_4" = "D28",
+                          "N_1" = "Neo",
+                          "A_1" = "A4T",
+                          "O_1" = "A24"))
 
-Multi@meta.data <- Multi@meta.data %>%
-  mutate(origin = recode(origin, 
-                         "D_1" = "D4",
-                         "D_2" = "D4",
-                         "D_3" = "D28",
-                         "D_4" = "D28",
-                         "L_1" = "A18",
-                         "L_2" = "A4T",
-                         "L_3" = "A24"))
+Idents(Merged) <- "seurat_clusters"
 
-#To transfer celltypes to seurat meta data;
-celltype <- Multi@active.ident
+new.cluster.ids <- c("CM", "CM", "EC", "FB", "EC", "Macro", "CM", "Peri", "CM", "CM", "CM", "FB", "EC", "IM", "Peri", "FB", "EC", "CM", "CM", "Macro", "FB", "EC", "CM")
+names(new.cluster.ids) <- levels(Merged)
+Merged <- RenameIdents(Merged, new.cluster.ids)
+DimPlot(Merged, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
 
-Multi@meta.data$celltype <- celltype
-
-# Save your Seurat object to an RDS file
-saveRDS(Multi, file = "Multi.rds")
-
-
-# Subset Multi Seurat object for CM cell type
-CM_cells <- subset(Multi, idents = "CM")
-
-# Visualize or summarize the CM cells by sample
-table(CM_cells$origin)
-
-library(ggplot2)
-
-# Subset Multi Seurat object for CM cell type
-CM_cells <- subset(Multi, idents = "CM")
-
-# Visualize or summarize the CM cells by sample
-table(CM_cells$origin)
-
-library(ggplot2)
-
-# Create a data frame for plotting
-CM_metadata <- CM_cells@meta.data
-
-# Plot the distribution of CM cells across samples
-ggplot(CM_metadata, aes(x = origin)) +
-  geom_bar() +
-  theme_minimal() +
-  labs(title = "Distribution of CM Cells by origin", x = "origin", y = "Count")
-
-DimPlot(CM_cells, reduction = "umap", group.by = "origin", label = TRUE, pt.size = 0.5)
-
-# Set the identity class to 'origin' if it contains the D28 information
-CM_cells <- SetIdent(CM_cells, value = "origin")
-CM_cells <- PrepSCTFindMarkers(CM_cells)
-# Find markers for the aged and disease clusters compared to D4 (Adult2)
-aged_genes <- FindMarkers(CM_cells, 
-                                  ident.1 = "D28", 
-                                  ident.2 = "D4", 
-                                  min.pct = 0.25, 
-                                  logfc.threshold = 0.25)
-
-write.csv(aged_genes, file = "aged_genes_D28.csv")
-
-mid_aged_genes <- FindMarkers(CM_cells, 
-                          ident.1 = "A24", 
-                          ident.2 = "D4", 
-                          min.pct = 0.25, 
-                          logfc.threshold = 0.25)
-
-write.csv(mid_aged_genes, file = "aged_genes_A24.csv")
-
-diseased_genes <- FindMarkers(CM_cells, 
-                              ident.1 = "A4T", 
-                              ident.2 = "D4", 
-                              min.pct = 0.25, 
-                              logfc.threshold = 0.25)
-write.csv(diseased_genes, file = "aged_genes_A4T.csv")
-
-adult18_genes <- FindMarkers(CM_cells, 
-                              ident.1 = "A18", 
-                              ident.2 = "D4", 
-                              min.pct = 0.25, 
-                              logfc.threshold = 0.25)
-write.csv(adult18_genes, file = "aged_genes_A18.csv")
-
-# Identify top 10 highly expressed genes from the `aged_genes` results
-top_genes <- head(aged_genes[order(aged_genes$avg_log2FC, decreasing = TRUE), ], 10)
-
-# Plot these top genes as a violin plot
-VlnPlot(CM_cells, features = rownames(top_genes))
-
-# Identify top 10 highly expressed genes from the `mid_aged_genes` results
-top_genes <- head(mid_aged_genes[order(mid_aged_genes$avg_log2FC, decreasing = TRUE), ], 10)
-
-# Plot these top genes as a violin plot
-VlnPlot(CM_cells, features = rownames(top_genes))
-
-# Identify top 10 highly expressed genes from the `adult18_genes` results
-top_genes <- head(adult18_genes[order(adult18_genes$avg_log2FC, decreasing = TRUE), ], 10)
-
-# Plot these top genes as a violin plot
-VlnPlot(CM_cells, features = rownames(top_genes))
-
-# Identify top 10 highly expressed genes from the `diseased_genes` results
-top_genes <- head(diseased_genes[order(diseased_genes$avg_log2FC, decreasing = TRUE), ], 10)
-
-# Plot these top genes as a violin plot
-VlnPlot(CM_cells, features = rownames(top_genes)
-
-
-# Run Louvain clustering (resolution is a tuning parameter)
-CM_cells <- FindClusters(CM_cells, resolution = 0.5, algorithm = 1)  # algorithm = 1 is Louvain
-
-# Define the sample pairs for comparison
-comparisons <- list(
-  c("D4", "D28"),
-  c("D4", "A24"),
-  c("D4", "A4T"),
-  c("D4", "A18"),
-  c("A18", "A24"),
-  c("A18", "A4T"),
-  c("A24", "A4T")
-)
-
-# Loop through each pair and generate a DimPlot
-for (pair in comparisons) {
-  subset_cells <- subset(CM_cells, subset = origin %in% pair)  # Subset by origin
-  p <- DimPlot(subset_cells, reduction = "umap", group.by = "origin", label = TRUE, pt.size = 0.5) +
-    ggtitle(paste(pair[1], "vs", pair[2])) +
-    theme_minimal()
-  
-  print(p)  # Display the plot
-}
-
-
+Idents(Merged) <- new.cluster.ids
+---------------------------------------------------------------------------------------------------------------------------
+#sybsetting CMs
 
 CM_cells <- subset(Merged, idents = "CM")
-# Set the identities to the 'origin' column
 Idents(CM_cells) <- "origin"
-# Join the RNA and any other layers (if applicable)
 CM_cells[["RNA"]] <- JoinLayers(CM_cells[["RNA"]])
 
 deg_D28_vs_D4 <- FindMarkers(CM_cells, 
@@ -272,7 +237,19 @@ deg_A24_vs_D4 <- FindMarkers(CM_cells,
                              logfc.threshold = 0.25, 
                              min.pct = 0.1)
 
+deg_Neo_vs_D4 <- FindMarkers(CM_cells, 
+                             ident.1 = "Neo", 
+                             ident.2 = "D4", 
+                             logfc.threshold = 0.25, 
+                             min.pct = 0.1)
+
+
 # Save DEG results to CSV files
 write.csv(deg_D28_vs_D4, file = "D28_vs_D4_DEGs.csv")
 write.csv(deg_A4T_vs_D4, file = "A4T_vs_D4_DEGs.csv")
-write.csv(deg_A4T_vs_D4, file = "A24_vs_D4_DEGs.csv")
+write.csv(deg_A24_vs_D4, file = "A24_vs_D4_DEGs.csv")
+write.csv(deg_Neo_vs_D4, file = "Neo_vs_D4_DEGs.csv")
+
+
+
+
