@@ -270,3 +270,103 @@ DimPlot(CM_cells_D28_vs_D4, group.by = "origin", label = TRUE, pt.size = 1)
 CM_cells_Neo_vs_D4 <- subset(CM_cells_subset, idents = c("Neo", "D4"))
 DimPlot(CM_cells_Neo_vs_D4, group.by = "origin", label = TRUE, pt.size = 1)
 
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+#reclustering CM_cells
+
+CM_cells <- CM_cells %>%
+  #NormalizeData(verbose = FALSE) %>%
+  #FindVariableFeatures(method = "vst", nfeatures = 3000, verbose = FALSE) %>%
+  #ScaleData(verbose = FALSE, features = VariableFeatures(.)) %>%
+  RunPCA(verbose = FALSE) %>%
+  #RunHarmony(group.by.vars = "orig.ident", plot_convergence = TRUE) %>%  # Apply Harmony
+  FindNeighbors(dims = 1:10, reduction = "harmony") %>%  # Use Harmony reduction
+  FindClusters(resolution = 2.0) %>%
+  RunUMAP(dims = 1:10)  # Use Harmony reduction for UMAP
+
+ CM_cells <- FindClusters(CM_cells, resolution = 0.5) #adjust based on what you need resolution for...
+
+#by doing this we can identify CM_cells only
+marker_genes <- list(
+   CM = c("Tnnt2", "Actc1", "Myh6", "Myh7", "Myl2", "Myl7"),
+   EC = c("Pecam1", "Cdh5", "Vegfa", "Kdr", "Nos3"),
+   SMC = c("Acta2", "Tagln", "Myh11", "Smtn"),
+   FB = c("Col1a1", "Col3a1", "Postn", "Dcn", "Tcf21"),
+   Macro = c("Adgre1", "Cd68", "Itgam", "Csf1r", "Mrc1"),
+   B_cells = c("Cd19", "Cd79a", "Ms4a1"),   
+   T_cells = c("Cd3e", "Cd4", "Cd8a", "Il7r"),
+   Meso = c("Msln", "Wt1"),
+   Pericytes = c("Pdgfrb", "Cspg4", "Anpep"),
+   Mono = c("Cd14", "Ms4a7"),
+   NK = c("Nkg7"),
+   DC = c("Cst3")
+ )
+DotPlot(Merged, features = marker_genes) + 
+   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+new.cluster.ids <- c("CM", "CM", "CM", "CM", "CM", "CM", "CM", "CM", "EC", "FB", "CM", "CM", "CM", "CM", "CM", "MACRO", "CM", "EC", "CM", "CM", "CM", "PERI", "CM", "CM", "EC", "CM", "FB", "FB", "IM","FB", "PERI", "MACRO")
+names(new.cluster.ids) <- levels(CM_cells)
+CM_cells <- RenameIdents(CM_cells, new.cluster.ids)
+DimPlot(CM_cells, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+
+# Grouping by the 'origin' column and customizing the plot
+DimPlot(CM_cells, reduction = "umap", label = TRUE, pt.size = 0.5, group.by = "origin") + 
+  NoLegend()
+
+CM_cells <- subset(CM_cells, idents = "CM")
+
+CM_cells <- FindClusters(CM_cells, resolution = 0.5) #adjust based on what you need resolution for...
+
+data <- CM_cells@meta.data %>%
+  dplyr::count(seurat_clusters, origin) %>%
+  dplyr::group_by(origin) %>%
+  dplyr::mutate(Percentage = n / sum(n) * 100)
+
+ggplot(data, aes(x = origin, y = n, fill = factor(seurat_clusters))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "origin", y = "Number of Cells", fill = "Cluster") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(data, aes(x = origin, y = Percentage, fill = factor(seurat_clusters))) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(x = "origin", y = "Percentage of Cells", fill = "Cluster") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(data, aes(x = origin, y = Percentage, fill = factor(seurat_clusters))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "origin", y = "Percentage of Cells", fill = "Cluster") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+#above will help to identify which clusters to find markers for...
+
+# Set the identities to seurat_clusters
+Idents(CM_cells) <- "seurat_clusters"
+
+# Identify markers for each cluster
+markers_9 <- FindMarkers(CM_cells, ident.1 = 9, only.pos = TRUE)
+markers_18 <- FindMarkers(CM_cells, ident.1 = 18, only.pos = TRUE)
+markers_12 <- FindMarkers(CM_cells, ident.1 = 12, only.pos = TRUE)
+markers_8 <- FindMarkers(CM_cells, ident.1 = 8, only.pos = TRUE)
+markers_0 <- FindMarkers(CM_cells, ident.1 = 0, only.pos = TRUE)
+markers_3 <- FindMarkers(CM_cells, ident.1 = 3, only.pos = TRUE)
+markers_4 <- FindMarkers(CM_cells, ident.1 = 4, only.pos = TRUE)
+
+# Save the results to files if needed
+write.csv(markers_9, "markers_cluster_9.csv")
+write.csv(markers_18, "markers_cluster_18.csv")
+write.csv(markers_12, "markers_cluster_12.csv")
+write.csv(markers_8, "markers_cluster_8.csv")
+write.csv(markers_0, "markers_cluster_0.csv")
+write.csv(markers_3, "markers_cluster_3.csv")
+write.csv(markers_4, "markers_cluster_4.csv")
+
+
+
+
+
+
+
