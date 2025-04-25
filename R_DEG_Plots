@@ -6,7 +6,7 @@ library(tibble)
 
 
 # Load your cardiomyocyte data
-cm <- readRDS("CM_cells.rds")
+cm <- readRDS("MACRO_cells.rds")
 
 # Assuming your data is in a Seurat object
 # First check current origin values
@@ -262,168 +262,104 @@ pheatmap(top_down_expr,
 
 
 library(clusterProfiler)
-library(org.Mm.eg.db)  # Assuming you're working with mouse data
+library(org.Mm.eg.db)  # For mouse
 library(dplyr)
-
-# For upregulated genes
-up_genes_entrez <- bitr(unique(top_up_all$gene), 
-                        fromType = "SYMBOL", 
-                        toType = "ENTREZID", 
-                        OrgDb = org.Mm.eg.db)
-
-# For downregulated genes
-down_genes_entrez <- bitr(unique(top_down_all$gene), 
-                          fromType = "SYMBOL", 
-                          toType = "ENTREZID", 
-                          OrgDb = org.Mm.eg.db)
-# GO for upregulated
-go_up <- enrichGO(gene = up_genes_entrez$ENTREZID,
-                  OrgDb = org.Mm.eg.db,
-                  keyType = "ENTREZID",
-                  ont = "BP",
-                  pAdjustMethod = "BH",
-                  pvalueCutoff = 0.05,
-                  qvalueCutoff = 0.2,
-                  readable = TRUE)
-
-# GO for downregulated
-go_down <- enrichGO(gene = down_genes_entrez$ENTREZID,
-                    OrgDb = org.Mm.eg.db,
-                    keyType = "ENTREZID",
-                    ont = "BP",
-                    pAdjustMethod = "BH",
-                    pvalueCutoff = 0.05,
-                    qvalueCutoff = 0.2,
-                    readable = TRUE)
-
-# Dotplot
-dotplot(go_up, showCategory = 15, title = "GO Enrichment (Upregulated Genes)")
-dotplot(go_down, showCategory = 15, title = "GO Enrichment (Downregulated Genes)")
-
-# Barplot (optional)
-barplot(go_up, showCategory = 10, title = "GO - Up")
-barplot(go_down, showCategory = 10, title = "GO - Down")
-
-
-# Required libraries
-library(Seurat)
-library(dplyr)
-library(pheatmap)
-library(ggplot2)
-library(clusterProfiler)
 library(tidyr)
-library(tibble)
+library(ggplot2)
 
-# Assuming you already have upregulated and downregulated genes, GO terms, and enriched results.
-# These variables should already be available from the previous code snippets:
-# - up_go_all (GO term results for upregulated genes)
-# - down_go_all (GO term results for downregulated genes)
-# - condition is stored in your GO terms dataframe
-# Perform GO enrichment for upregulated genes using clusterProfiler
-# Perform GO enrichment for upregulated genes using clusterProfiler
+# Define up/down gene lists per condition
+up_genes <- list()
+down_genes <- list()
+
+for (cond in names(de_list)) {
+  df <- de_list[[cond]]
+  
+  up_genes[[cond]] <- df %>%
+    filter(p_val_adj < 0.05, avg_log2FC > 0.25) %>%
+    pull(gene)
+  
+  down_genes[[cond]] <- df %>%
+    filter(p_val_adj < 0.05, avg_log2FC < -0.25) %>%
+    pull(gene)
+}
+
+# GO enrichment function
+go_enrich <- function(gene_list, ont="BP") {
+  enrichGO(gene = gene_list,
+           OrgDb = org.Mm.eg.db,
+           keyType = "SYMBOL",
+           ont = ont,
+           pAdjustMethod = "BH",
+           pvalueCutoff = 0.05,
+           qvalueCutoff = 0.2)
+}
+
+# Run enrichment per condition
+go_up <- lapply(up_genes, go_enrich)
+go_down <- lapply(down_genes, go_enrich)
 
 
+# Format for plotting
+extract_top_terms <- function(go_list, direction, top_n = 25) {
+  bind_rows(lapply(names(go_list), function(cond) {
+    df <- go_list[[cond]]@result %>%
+      arrange(p.adjust) %>%
+      head(top_n) %>%
+      mutate(condition = cond, direction = direction)
+  }))
+}
 
-# Collect the enrichment results for upregulated genes
-up_go_all <- as.data.frame(go_up)
-up_go_all$condition <- "Upregulated"
+top_go_up <- extract_top_terms(go_up, "Up")
+top_go_down <- extract_top_terms(go_down, "Down")
+top_go_all <- bind_rows(top_go_up, top_go_down)
 
-# Collect the enrichment results for downregulated genes
-down_go_all <- as.data.frame(go_down)
-down_go_all$condition <- "Downregulated"
+library(forcats)
 
-# Top GO terms for upregulated genes
-top_up_terms <- up_go_all %>%
-  group_by(condition) %>%
-  slice_min(order_by = p.adjust, n = 5) %>%
-  ungroup()
+top_go_all$Description <- fct_reorder(top_go_all$Description, -top_go_all$p.adjust)
 
-# Top GO terms for downregulated genes
-top_down_terms <- down_go_all %>%
-  group_by(condition) %>%
-  slice_min(order_by = p.adjust, n = 5) %>%
-  ungroup()
+ggplot(top_go_all, aes(x = condition, y = Description, size = Count, color = -log10(p.adjust))) +
+  geom_point(alpha = 0.8) +
+  facet_wrap(~ direction, scales = "free_y") +
+  scale_color_viridis_c() +
+  theme_bw(base_size = 12) +
+  labs(title = "GO Enrichment of DEGs",
+       x = "Condition",
+       y = "GO Term",
+       size = "Gene Count",
+       color = "-log10(p.adjust)")
 
-# Combine top up and down regulated terms
-top_terms <- bind_rows(top_up_terms, top_down_terms)
+# Separate the data
+top_go_up_only <- top_go_all %>% filter(direction == "Up")
+top_go_down_only <- top_go_all %>% filter(direction == "Down")
 
-# Extract and filter the most common GO terms across conditions
-top_common_terms <- top_terms %>%
-  count(Description, sort = TRUE) %>%
-  slice_max(n, n = 10) %>%
-  pull(Description)
+top_go_up_only$Description <- fct_reorder(top_go_up_only$Description, -top_go_up_only$p.adjust)
 
-# Filter for the common terms
-top_shared <- top_terms %>%
-  filter(Description %in% top_common_terms)
+p_up <- ggplot(top_go_up_only, aes(x = condition, y = Description, size = Count, color = -log10(p.adjust))) +
+  geom_point(alpha = 0.8) +
+  scale_color_viridis_c() +
+  theme_bw(base_size = 12) +
+  labs(title = "GO Enrichment - Upregulated Genes",
+       x = "Condition",
+       y = "GO Term",
+       size = "Gene Count",
+       color = "-log10(p.adjust)")
 
-# Create the side-by-side bar plot
-ggplot(top_shared, aes(x = reorder(Description, -p.adjust), 
-                       y = -log10(p.adjust), 
-                       fill = condition)) +
-  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
-  coord_flip() +
-  theme_minimal() +
-  labs(x = NULL, 
-       y = "-log10(Adjusted P-value)",
-       title = "Top Shared GO Terms (Upregulated and Downregulated DEGs)",
-       fill = "Condition") +
-  theme(axis.text.y = element_text(size = 10),
-        plot.title = element_text(size = 14, face = "bold"))
+p_up
 
-# Create the side-by-side bar plot with condition as x-axis
-ggplot(top_shared, aes(x = reorder(Description, -p.adjust), 
-                       y = -log10(p.adjust), 
-                       fill = condition)) +
-  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
-  coord_flip() +
-  theme_minimal() +
-  labs(x = NULL, 
-       y = "-log10(Adjusted P-value)",
-       title = "Top Shared GO Terms (Upregulated and Downregulated DEGs)",
-       fill = "Condition") +
-  theme(axis.text.y = element_text(size = 10),
-        plot.title = element_text(size = 14, face = "bold"))
+ggsave("GO_Upregulated_Dotplot.pdf", plot = p_up, width = 20, height = 15)
 
-# Create a facet bar plot by condition
-ggplot(top_shared, aes(x = reorder(Description, -p.adjust), 
-                       y = -log10(p.adjust), 
-                       fill = condition)) +
-  geom_col(width = 0.7) +
-  coord_flip() +
-  facet_wrap(~condition, scales = "free_y") +  # Facet by condition
-  theme_minimal() +
-  labs(x = NULL, 
-       y = "-log10(Adjusted P-value)",
-       title = "Top Shared GO Terms (Upregulated and Downregulated DEGs)",
-       fill = "Condition") +
-  theme(axis.text.y = element_text(size = 10),
-        plot.title = element_text(size = 14, face = "bold"))
+top_go_down_only$Description <- fct_reorder(top_go_down_only$Description, -top_go_down_only$p.adjust)
 
-# Create a stacked bar plot
-ggplot(top_shared, aes(x = reorder(Description, -p.adjust), 
-                       y = -log10(p.adjust), 
-                       fill = condition)) +
-  geom_bar(stat = "identity", position = "stack", width = 0.7) +
-  coord_flip() +
-  theme_minimal() +
-  labs(x = NULL, 
-       y = "-log10(Adjusted P-value)",
-       title = "Top Shared GO Terms (Upregulated and Downregulated DEGs)",
-       fill = "Condition") +
-  theme(axis.text.y = element_text(size = 10),
-        plot.title = element_text(size = 14, face = "bold"))
+p_down <- ggplot(top_go_down_only, aes(x = condition, y = Description, size = Count, color = -log10(p.adjust))) +
+  geom_point(alpha = 0.8) +
+  scale_color_viridis_c() +
+  theme_bw(base_size = 12) +
+  labs(title = "GO Enrichment - Downregulated Genes",
+       x = "Condition",
+       y = "GO Term",
+       size = "Gene Count",
+       color = "-log10(p.adjust)")
 
-# Create a side-by-side grouped bar plot
-ggplot(top_shared, aes(x = reorder(Description, -p.adjust), 
-                       y = -log10(p.adjust), 
-                       fill = condition)) +
-  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
-  coord_flip() +
-  theme_minimal() +
-  labs(x = NULL, 
-       y = "-log10(Adjusted P-value)",
-       title = "Top Shared GO Terms (Upregulated and Downregulated DEGs)",
-       fill = "Condition") +
-  theme(axis.text.y = element_text(size = 10),
-        plot.title = element_text(size = 14, face = "bold"))
+ggsave("GO_Downregulated_Dotplot.pdf", plot = p_down, width = 20, height = 15)
+
+
