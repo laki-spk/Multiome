@@ -1,0 +1,429 @@
+library(Seurat)
+library(dplyr)
+library(pheatmap)
+library(ggplot2)
+library(tibble)
+
+
+# Load your cardiomyocyte data
+cm <- readRDS("CM_cells.rds")
+
+# Assuming your data is in a Seurat object
+# First check current origin values
+table(cm@meta.data$origin)
+
+# Create condition column (with explicit factor levels if needed)
+cm@meta.data <- cm@meta.data %>%
+  mutate(
+    condition = case_when(
+      origin == "A4T" ~ "4M_TAC",
+      origin == "D4" ~ "4M",
+      origin == "D28" ~ "28M",
+      origin == "A24" ~ "24M", 
+      origin == "Neo" ~ "Neo",
+      TRUE ~ origin  # fallback
+    ),
+    # Convert to factor with meaningful order (optional)
+    condition = factor(condition, 
+                       levels = c("Neo", "4M", "4M_TAC", "24M", "28M"))
+  )
+
+de_list <- list()
+comparisons <- c("D28", "A4T", "Neo", "A24")
+
+for (cond in comparisons) {
+  de <- FindMarkers(cm, ident.1 = cond, ident.2 = "D4", group.by = "origin",
+                    logfc.threshold = 0.25, min.pct = 0.1, only.pos = FALSE)
+  de$gene <- rownames(de)
+  de$comparison <- cond
+  de_list[[cond]] <- de %>% filter(p_val_adj < 0.05)
+}
+all_degs <- bind_rows(de_list)
+up_genes <- all_degs %>% filter(avg_log2FC > 0.25) %>% pull(gene) %>% unique()
+down_genes <- all_degs %>% filter(avg_log2FC < 0.25) %>% pull(gene) %>% unique()
+all_genes <- unique(c(up_genes, down_genes))
+cm_sub <- subset(cm, subset = origin %in% c("D4", "D28", "A4T", "Neo", "A24"))
+expr_mat <- GetAssayData(cm_sub, slot = "scale.data")
+expr_mat <- expr_mat[intersect(all_genes, rownames(expr_mat)), ]
+avg_expr <- AverageExpression(cm_sub, group.by = "origin", return.seurat = FALSE)
+avg_mat <- avg_expr$RNA[rownames(expr_mat), c("Neo", "A4T", "A24", "D28", "D4")]
+set.seed(123)
+k <- 4  # Choose the number of clusters
+km <- kmeans(avg_mat, centers = k)
+row_order <- order(km$cluster)
+pheatmap(avg_mat[row_order, ],
+         scale = "row",
+         cluster_cols = TRUE,
+         cluster_rows = FALSE,  # Already clustered by kmeans
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         annotation_row = data.frame(Cluster = as.factor(km$cluster)),
+         fontsize = 10,
+         main = "DEG Expression Heatmap Across Conditions")
+
+wss <- vector()
+k_max <- 10  # Test up to 10 clusters
+
+# Calculate within-cluster sum of squares for each k
+for (k in 1:k_max) {
+  km_out <- kmeans(avg_mat, centers = k, nstart = 25)
+  wss[k] <- km_out$tot.withinss
+}
+
+# Plot the elbow plot
+plot(1:k_max, wss, type = "b", pch = 19,
+     xlab = "Number of Clusters (k)",
+     ylab = "Total Within-Cluster Sum of Squares",
+     main = "Elbow Plot for K-means")
+
+
+up_mat <- avg_mat[intersect(up_genes, rownames(avg_mat)), ]
+
+wss <- vector()
+k_max <- 10  # Test up to 10 clusters
+
+# Calculate within-cluster sum of squares for each k
+for (k in 1:k_max) {
+  km_out <- kmeans(up_mat, centers = k, nstart = 25)
+  wss[k] <- km_out$tot.withinss
+}
+
+# Plot the elbow plot
+plot(1:k_max, wss, type = "b", pch = 19,
+     xlab = "Number of Clusters (k)",
+     ylab = "Total Within-Cluster Sum of Squares",
+     main = "Elbow Plot for K-means")
+
+# K-means clustering for upregulated genes
+set.seed(123)
+k_up <- 4
+km_up <- kmeans(up_mat, centers = k_up)
+up_order <- order(km_up$cluster)
+
+# Plot
+pheatmap(up_mat[up_order, ],
+         scale = "row",
+         cluster_cols = TRUE,
+         cluster_rows = FALSE,
+         show_rownames = FALSE,
+         annotation_row = data.frame(Cluster = as.factor(km_up$cluster)),
+         fontsize = 10,
+         main = "Upregulated DEGs")
+
+down_mat <- avg_mat[intersect(down_genes, rownames(avg_mat)), ]
+
+wss <- vector()
+k_max <- 10  # Test up to 10 clusters
+
+# Calculate within-cluster sum of squares for each k
+for (k in 1:k_max) {
+  km_out <- kmeans(down_mat, centers = k, nstart = 25)
+  wss[k] <- km_out$tot.withinss
+}
+
+# Plot the elbow plot
+plot(1:k_max, wss, type = "b", pch = 19,
+     xlab = "Number of Clusters (k)",
+     ylab = "Total Within-Cluster Sum of Squares",
+     main = "Elbow Plot for K-means")
+# K-means clustering for downregulated genes
+set.seed(123)
+k_down <- 4
+km_down <- kmeans(down_mat, centers = k_down)
+down_order <- order(km_down$cluster)
+
+# Plot
+pheatmap(down_mat[down_order, ],
+         scale = "row",
+         cluster_cols = TRUE,
+         cluster_rows = FALSE,
+         show_rownames = FALSE,
+         annotation_row = data.frame(Cluster = as.factor(km_down$cluster)),
+         fontsize = 10,
+         main = "Downregulated DEGs")
+
+
+# Get top 20 upregulated genes
+top_up_genes <- all_degs %>%
+  filter(avg_log2FC > 0.25, p_val_adj < 0.05) %>%
+  arrange(p_val_adj, desc(avg_log2FC)) %>%
+  distinct(gene, .keep_all = TRUE) %>%
+  slice_head(n = 20) %>%
+  pull(gene)
+
+# Get top 20 downregulated genes
+top_down_genes <- all_degs %>%
+  filter(avg_log2FC < 0, p_val_adj < 0.05) %>%
+  arrange(p_val_adj, avg_log2FC) %>%
+  distinct(gene, .keep_all = TRUE) %>%
+  slice_head(n = 20) %>%
+  pull(gene)
+
+top_up_mat <- avg_mat[top_up_genes, ]
+
+pheatmap(top_up_mat,
+         scale = "row",
+         cluster_cols = TRUE,
+         cluster_rows = TRUE,
+         show_rownames = TRUE,
+         fontsize_row = 10,
+         fontsize_col = 10,
+         main = "Top 20 Upregulated DEGs")
+
+top_down_mat <- avg_mat[top_down_genes, ]
+
+pheatmap(top_down_mat,
+         scale = "row",
+         cluster_cols = TRUE,
+         cluster_rows = TRUE,
+         show_rownames = TRUE,
+         fontsize_row = 10,
+         fontsize_col = 10,
+         main = "Top 20 Downregulated DEGs")
+
+top_up_list <- list()
+
+for (cond in comparisons) {
+  top_up <- de_list[[cond]] %>%
+    filter(avg_log2FC > 0.25, p_val_adj < 0.05) %>%
+    arrange(p_val_adj, desc(avg_log2FC)) %>%
+    distinct(gene, .keep_all = TRUE) %>%
+    slice_head(n = 20) %>%
+    mutate(condition = cond)
+  
+  top_up_list[[cond]] <- top_up
+}
+
+# Combine top 20 upregulated genes per condition
+top_up_all <- bind_rows(top_up_list)
+
+# Unique gene list
+top_up_genes_all <- unique(top_up_all$gene)
+
+# Subset expression matrix
+top_up_expr <- avg_mat[intersect(top_up_genes_all, rownames(avg_mat)), ]
+
+# Optional: annotate gene origins for better visualization
+#gene_annotation <- top_up_all %>%
+#  select(gene, condition) %>%
+#  distinct() %>%
+#  column_to_rownames("gene")
+
+# Heatmap
+pheatmap(top_up_expr,
+         scale = "row",
+         cluster_cols = TRUE,
+         cluster_rows = FALSE,
+         show_rownames = TRUE,
+         #annotation_row = gene_annotation,
+         fontsize_row = 5,
+         fontsize_col = 10,
+         main = "Top 20 Upregulated Genes per Condition")
+
+top_down_list <- list()
+
+for (cond in comparisons) {
+  top_down <- de_list[[cond]] %>%
+    filter(avg_log2FC < -0.25, p_val_adj < 0.05) %>%
+    arrange(p_val_adj, avg_log2FC) %>%
+    distinct(gene, .keep_all = TRUE) %>%
+    slice_head(n = 20) %>%
+    mutate(condition = cond)
+  
+  top_down_list[[cond]] <- top_down
+}
+
+# Combine top 20 downregulated genes per condition
+top_down_all <- bind_rows(top_down_list)
+
+# Unique gene list
+top_down_genes_all <- unique(top_down_all$gene)
+
+# Subset expression matrix
+top_down_expr <- avg_mat[intersect(top_down_genes_all, rownames(avg_mat)), ]
+
+# Optional: annotate gene origins for better visualization
+#gene_annotation_down <- top_down_all %>%
+#  select(gene, condition) %>%
+#  distinct() %>%
+#  column_to_rownames("gene")
+
+# Heatmap
+pheatmap(top_down_expr,
+         scale = "row",
+         cluster_cols = TRUE,
+         cluster_rows = FALSE,
+         show_rownames = TRUE,
+         #annotation_row = gene_annotation_down,
+         fontsize_row = 5,
+         fontsize_col = 10,
+         main = "Top 20 Downregulated Genes per Condition")
+
+
+
+library(clusterProfiler)
+library(org.Mm.eg.db)  # Assuming you're working with mouse data
+library(dplyr)
+
+# For upregulated genes
+up_genes_entrez <- bitr(unique(top_up_all$gene), 
+                        fromType = "SYMBOL", 
+                        toType = "ENTREZID", 
+                        OrgDb = org.Mm.eg.db)
+
+# For downregulated genes
+down_genes_entrez <- bitr(unique(top_down_all$gene), 
+                          fromType = "SYMBOL", 
+                          toType = "ENTREZID", 
+                          OrgDb = org.Mm.eg.db)
+# GO for upregulated
+go_up <- enrichGO(gene = up_genes_entrez$ENTREZID,
+                  OrgDb = org.Mm.eg.db,
+                  keyType = "ENTREZID",
+                  ont = "BP",
+                  pAdjustMethod = "BH",
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2,
+                  readable = TRUE)
+
+# GO for downregulated
+go_down <- enrichGO(gene = down_genes_entrez$ENTREZID,
+                    OrgDb = org.Mm.eg.db,
+                    keyType = "ENTREZID",
+                    ont = "BP",
+                    pAdjustMethod = "BH",
+                    pvalueCutoff = 0.05,
+                    qvalueCutoff = 0.2,
+                    readable = TRUE)
+
+# Dotplot
+dotplot(go_up, showCategory = 15, title = "GO Enrichment (Upregulated Genes)")
+dotplot(go_down, showCategory = 15, title = "GO Enrichment (Downregulated Genes)")
+
+# Barplot (optional)
+barplot(go_up, showCategory = 10, title = "GO - Up")
+barplot(go_down, showCategory = 10, title = "GO - Down")
+
+
+# Required libraries
+library(Seurat)
+library(dplyr)
+library(pheatmap)
+library(ggplot2)
+library(clusterProfiler)
+library(tidyr)
+library(tibble)
+
+# Assuming you already have upregulated and downregulated genes, GO terms, and enriched results.
+# These variables should already be available from the previous code snippets:
+# - up_go_all (GO term results for upregulated genes)
+# - down_go_all (GO term results for downregulated genes)
+# - condition is stored in your GO terms dataframe
+# Perform GO enrichment for upregulated genes using clusterProfiler
+# Perform GO enrichment for upregulated genes using clusterProfiler
+
+
+
+# Collect the enrichment results for upregulated genes
+up_go_all <- as.data.frame(go_up)
+up_go_all$condition <- "Upregulated"
+
+# Collect the enrichment results for downregulated genes
+down_go_all <- as.data.frame(go_down)
+down_go_all$condition <- "Downregulated"
+
+# Top GO terms for upregulated genes
+top_up_terms <- up_go_all %>%
+  group_by(condition) %>%
+  slice_min(order_by = p.adjust, n = 5) %>%
+  ungroup()
+
+# Top GO terms for downregulated genes
+top_down_terms <- down_go_all %>%
+  group_by(condition) %>%
+  slice_min(order_by = p.adjust, n = 5) %>%
+  ungroup()
+
+# Combine top up and down regulated terms
+top_terms <- bind_rows(top_up_terms, top_down_terms)
+
+# Extract and filter the most common GO terms across conditions
+top_common_terms <- top_terms %>%
+  count(Description, sort = TRUE) %>%
+  slice_max(n, n = 10) %>%
+  pull(Description)
+
+# Filter for the common terms
+top_shared <- top_terms %>%
+  filter(Description %in% top_common_terms)
+
+# Create the side-by-side bar plot
+ggplot(top_shared, aes(x = reorder(Description, -p.adjust), 
+                       y = -log10(p.adjust), 
+                       fill = condition)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  coord_flip() +
+  theme_minimal() +
+  labs(x = NULL, 
+       y = "-log10(Adjusted P-value)",
+       title = "Top Shared GO Terms (Upregulated and Downregulated DEGs)",
+       fill = "Condition") +
+  theme(axis.text.y = element_text(size = 10),
+        plot.title = element_text(size = 14, face = "bold"))
+
+# Create the side-by-side bar plot with condition as x-axis
+ggplot(top_shared, aes(x = reorder(Description, -p.adjust), 
+                       y = -log10(p.adjust), 
+                       fill = condition)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  coord_flip() +
+  theme_minimal() +
+  labs(x = NULL, 
+       y = "-log10(Adjusted P-value)",
+       title = "Top Shared GO Terms (Upregulated and Downregulated DEGs)",
+       fill = "Condition") +
+  theme(axis.text.y = element_text(size = 10),
+        plot.title = element_text(size = 14, face = "bold"))
+
+# Create a facet bar plot by condition
+ggplot(top_shared, aes(x = reorder(Description, -p.adjust), 
+                       y = -log10(p.adjust), 
+                       fill = condition)) +
+  geom_col(width = 0.7) +
+  coord_flip() +
+  facet_wrap(~condition, scales = "free_y") +  # Facet by condition
+  theme_minimal() +
+  labs(x = NULL, 
+       y = "-log10(Adjusted P-value)",
+       title = "Top Shared GO Terms (Upregulated and Downregulated DEGs)",
+       fill = "Condition") +
+  theme(axis.text.y = element_text(size = 10),
+        plot.title = element_text(size = 14, face = "bold"))
+
+# Create a stacked bar plot
+ggplot(top_shared, aes(x = reorder(Description, -p.adjust), 
+                       y = -log10(p.adjust), 
+                       fill = condition)) +
+  geom_bar(stat = "identity", position = "stack", width = 0.7) +
+  coord_flip() +
+  theme_minimal() +
+  labs(x = NULL, 
+       y = "-log10(Adjusted P-value)",
+       title = "Top Shared GO Terms (Upregulated and Downregulated DEGs)",
+       fill = "Condition") +
+  theme(axis.text.y = element_text(size = 10),
+        plot.title = element_text(size = 14, face = "bold"))
+
+# Create a side-by-side grouped bar plot
+ggplot(top_shared, aes(x = reorder(Description, -p.adjust), 
+                       y = -log10(p.adjust), 
+                       fill = condition)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  coord_flip() +
+  theme_minimal() +
+  labs(x = NULL, 
+       y = "-log10(Adjusted P-value)",
+       title = "Top Shared GO Terms (Upregulated and Downregulated DEGs)",
+       fill = "Condition") +
+  theme(axis.text.y = element_text(size = 10),
+        plot.title = element_text(size = 14, face = "bold"))
