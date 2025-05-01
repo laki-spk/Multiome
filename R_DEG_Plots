@@ -4,15 +4,10 @@ library(pheatmap)
 library(ggplot2)
 library(tibble)
 
-
 # Load your cardiomyocyte data
-cm <- readRDS("MACRO_cells.rds")
+cm <- readRDS("CM_cells.rds")
 
-# Assuming your data is in a Seurat object
-# First check current origin values
-table(cm@meta.data$origin)
-
-# Create condition column (with explicit factor levels if needed)
+# Create a 'condition' column
 cm@meta.data <- cm@meta.data %>%
   mutate(
     condition = case_when(
@@ -21,13 +16,12 @@ cm@meta.data <- cm@meta.data %>%
       origin == "D28" ~ "28M",
       origin == "A24" ~ "24M", 
       origin == "Neo" ~ "Neo",
-      TRUE ~ origin  # fallback
+      TRUE ~ origin
     ),
-    # Convert to factor with meaningful order (optional)
-    condition = factor(condition, 
-                       levels = c("Neo", "4M", "4M_TAC", "24M", "28M"))
+    condition = factor(condition, levels = c("Neo", "4M", "4M_TAC", "24M", "28M"))
   )
 
+# Differential expression
 de_list <- list()
 comparisons <- c("D28", "A4T", "Neo", "A24")
 
@@ -38,112 +32,136 @@ for (cond in comparisons) {
   de$comparison <- cond
   de_list[[cond]] <- de %>% filter(p_val_adj < 0.05)
 }
+
+# Extract DEG gene sets
 all_degs <- bind_rows(de_list)
 up_genes <- all_degs %>% filter(avg_log2FC > 0.25) %>% pull(gene) %>% unique()
-down_genes <- all_degs %>% filter(avg_log2FC < 0.25) %>% pull(gene) %>% unique()
+down_genes <- all_degs %>% filter(avg_log2FC < -0.25) %>% pull(gene) %>% unique()
 all_genes <- unique(c(up_genes, down_genes))
+
+# Subset and average expression
 cm_sub <- subset(cm, subset = origin %in% c("D4", "D28", "A4T", "Neo", "A24"))
-expr_mat <- GetAssayData(cm_sub, slot = "scale.data")
-expr_mat <- expr_mat[intersect(all_genes, rownames(expr_mat)), ]
 avg_expr <- AverageExpression(cm_sub, group.by = "origin", return.seurat = FALSE)
-avg_mat <- avg_expr$RNA[rownames(expr_mat), c("Neo", "A4T", "A24", "D28", "D4")]
+avg_mat <- avg_expr$RNA[intersect(all_genes, rownames(avg_expr$RNA)), c("Neo", "A4T", "A24", "D28", "D4")]
+
+# Elbow plot
+wss <- sapply(1:15, function(k) {
+  kmeans(avg_mat_scaled, centers = k, nstart = 25)$tot.withinss
+})
+
+pdf("elbow_plot_all_DEGs.pdf")
+plot(1:15, wss, type = "b", pch = 19,
+     xlab = "Number of Clusters (k)",
+     ylab = "Total Within-Cluster Sum of Squares",
+     main = "Elbow Plot for All DEGs")
+dev.off()
+
+# K-means clustering on all DEGs (scaled)
 set.seed(123)
-k <- 4  # Choose the number of clusters
-km <- kmeans(avg_mat, centers = k)
+k <- 14
+avg_mat_scaled <- t(scale(t(avg_mat)))
+km <- kmeans(avg_mat_scaled, centers = k)
 row_order <- order(km$cluster)
-pheatmap(avg_mat[row_order, ],
-         scale = "row",
-         cluster_cols = TRUE,
-         cluster_rows = FALSE,  # Already clustered by kmeans
-         show_rownames = FALSE,
-         show_colnames = TRUE,
+
+#pdf("DEG_expression_heatmap_scaled_rows.pdf", width = 12, height = 8)
+CM_all <- pheatmap(avg_mat_scaled[row_order, ],
+         cluster_cols = TRUE, cluster_rows = FALSE,
+         show_rownames = FALSE, show_colnames = TRUE,
          annotation_row = data.frame(Cluster = as.factor(km$cluster)),
-         fontsize = 10,
-         main = "DEG Expression Heatmap Across Conditions")
+         fontsize = 10, main = "DEG Expression Heatmap (Scaled Rows)")
+#dev.off()
+ggsave("DEG Expression Heatmap (Scaled Rows).pdf", plot = CM_all, width = 8, height = 6)
+# Convert to a data.frame with gene names and cluster assignment
+gene_clusters <- data.frame(
+  gene = rownames(avg_mat_scaled),
+  cluster = km$cluster
+)
 
-wss <- vector()
-k_max <- 10  # Test up to 10 clusters
-
-# Calculate within-cluster sum of squares for each k
-for (k in 1:k_max) {
-  km_out <- kmeans(avg_mat, centers = k, nstart = 25)
-  wss[k] <- km_out$tot.withinss
-}
-
-# Plot the elbow plot
-plot(1:k_max, wss, type = "b", pch = 19,
-     xlab = "Number of Clusters (k)",
-     ylab = "Total Within-Cluster Sum of Squares",
-     main = "Elbow Plot for K-means")
+# Save to CSV
+write.csv(gene_clusters, "gene_clusters_kmeans.csv", row.names = FALSE)
 
 
+
+
+# Upregulated
 up_mat <- avg_mat[intersect(up_genes, rownames(avg_mat)), ]
+up_mat_scaled <- t(scale(t(up_mat)))
 
-wss <- vector()
-k_max <- 10  # Test up to 10 clusters
+wss_up <- sapply(1:10, function(k) {
+  kmeans(up_mat_scaled, centers = k, nstart = 25)$tot.withinss
+})
 
-# Calculate within-cluster sum of squares for each k
-for (k in 1:k_max) {
-  km_out <- kmeans(up_mat, centers = k, nstart = 25)
-  wss[k] <- km_out$tot.withinss
-}
-
-# Plot the elbow plot
-plot(1:k_max, wss, type = "b", pch = 19,
+pdf("elbow_plot_upregulated.pdf")
+plot(1:10, wss_up, type = "b", pch = 19,
      xlab = "Number of Clusters (k)",
-     ylab = "Total Within-Cluster Sum of Squares",
-     main = "Elbow Plot for K-means")
+     ylab = "WSS",
+     main = "Elbow Plot for Upregulated Genes")
+dev.off()
 
-# K-means clustering for upregulated genes
+
 set.seed(123)
-k_up <- 4
-km_up <- kmeans(up_mat, centers = k_up)
+km_up <- kmeans(up_mat_scaled, centers = 10)
 up_order <- order(km_up$cluster)
 
-# Plot
-pheatmap(up_mat[up_order, ],
-         scale = "row",
-         cluster_cols = TRUE,
-         cluster_rows = FALSE,
+#pdf("upregulated_DEGs_heatmap_scaled_rows.pdf", width = 6, height = 8)
+CM_up <-  pheatmap(up_mat_scaled[up_order, ],
+         cluster_cols = TRUE, cluster_rows = FALSE,
          show_rownames = FALSE,
          annotation_row = data.frame(Cluster = as.factor(km_up$cluster)),
-         fontsize = 10,
-         main = "Upregulated DEGs")
+         fontsize = 10, main = "Upregulated DEGs (Scaled Rows)")
+#dev.off()
+ggsave("Upregulated DEGs_10 (Scaled Rows).pdf", plot = CM_up, width = 8, height = 6)
 
+gene_clusters <- data.frame(
+  gene = rownames(up_mat_scaled),
+  cluster = km_up$cluster
+)
+
+write.csv(gene_clusters, "gene_clusters_up_kmeans_10.csv", row.names = FALSE)
+
+
+
+# Downregulated
 down_mat <- avg_mat[intersect(down_genes, rownames(avg_mat)), ]
+down_mat_scaled <- t(scale(t(down_mat)))
 
-wss <- vector()
-k_max <- 10  # Test up to 10 clusters
+wss_down <- sapply(1:11, function(k) {
+  kmeans(down_mat_scaled, centers = k, nstart = 25)$tot.withinss
+})
 
-# Calculate within-cluster sum of squares for each k
-for (k in 1:k_max) {
-  km_out <- kmeans(down_mat, centers = k, nstart = 25)
-  wss[k] <- km_out$tot.withinss
-}
-
-# Plot the elbow plot
-plot(1:k_max, wss, type = "b", pch = 19,
+pdf("elbow_plot_downregulated.pdf")
+plot(1:11, wss_down, type = "b", pch = 19,
      xlab = "Number of Clusters (k)",
-     ylab = "Total Within-Cluster Sum of Squares",
-     main = "Elbow Plot for K-means")
-# K-means clustering for downregulated genes
+     ylab = "WSS",
+     main = "Elbow Plot for Downregulated Genes")
+dev.off()
+
 set.seed(123)
-k_down <- 4
-km_down <- kmeans(down_mat, centers = k_down)
+km_down <- kmeans(down_mat_scaled, centers = 10)
 down_order <- order(km_down$cluster)
 
-# Plot
-pheatmap(down_mat[down_order, ],
-         scale = "row",
-         cluster_cols = TRUE,
-         cluster_rows = FALSE,
+pdf("downregulated_DEGs_heatmap_scaled_rows.pdf", width = 6, height = 8)
+CM_down <- pheatmap(down_mat_scaled[down_order, ],
+         cluster_cols = TRUE, cluster_rows = FALSE,
          show_rownames = FALSE,
          annotation_row = data.frame(Cluster = as.factor(km_down$cluster)),
-         fontsize = 10,
-         main = "Downregulated DEGs")
+         fontsize = 10, main = "Downregulated DEGs (Scaled Rows)")
+dev.off()
+
+ggsave("Downregulated DEGs_10 (Scaled Rows).pdf", plot = CM_down, width = 8, height = 6)
+
+gene_clusters <- data.frame(
+  gene = rownames(down_mat_scaled),
+  cluster = km_down$cluster
+)
+
+write.csv(gene_clusters, "gene_clusters_down_kmeans_10.csv", row.names = FALSE)
 
 
-# Get top 20 upregulated genes
+
+________________________________________________________________________________________________________
+
+# Top 20 upregulated genes
 top_up_genes <- all_degs %>%
   filter(avg_log2FC > 0.25, p_val_adj < 0.05) %>%
   arrange(p_val_adj, desc(avg_log2FC)) %>%
@@ -151,113 +169,84 @@ top_up_genes <- all_degs %>%
   slice_head(n = 20) %>%
   pull(gene)
 
-# Get top 20 downregulated genes
+top_up_mat <- avg_mat[top_up_genes, ]
+top_up_mat_scaled <- t(scale(t(top_up_mat)))
+
+pdf("top20_upregulated_heatmap_scaled_rows.pdf", width = 6, height = 6)
+pheatmap(top_up_mat_scaled,
+         cluster_cols = TRUE, cluster_rows = TRUE,
+         show_rownames = TRUE,
+         fontsize_row = 10, fontsize_col = 10,
+         main = "Top 20 Upregulated DEGs (Scaled Rows)")
+dev.off()
+
+# Top 20 downregulated genes
 top_down_genes <- all_degs %>%
-  filter(avg_log2FC < 0, p_val_adj < 0.05) %>%
+  filter(avg_log2FC < -0.25, p_val_adj < 0.05) %>%
   arrange(p_val_adj, avg_log2FC) %>%
   distinct(gene, .keep_all = TRUE) %>%
   slice_head(n = 20) %>%
   pull(gene)
 
-top_up_mat <- avg_mat[top_up_genes, ]
-
-pheatmap(top_up_mat,
-         scale = "row",
-         cluster_cols = TRUE,
-         cluster_rows = TRUE,
-         show_rownames = TRUE,
-         fontsize_row = 10,
-         fontsize_col = 10,
-         main = "Top 20 Upregulated DEGs")
-
 top_down_mat <- avg_mat[top_down_genes, ]
+top_down_mat_scaled <- t(scale(t(top_down_mat)))
 
-pheatmap(top_down_mat,
-         scale = "row",
-         cluster_cols = TRUE,
-         cluster_rows = TRUE,
+pdf("top20_downregulated_heatmap_scaled_rows.pdf", width = 6, height = 6)
+pheatmap(top_down_mat_scaled,
+         cluster_cols = TRUE, cluster_rows = TRUE,
          show_rownames = TRUE,
-         fontsize_row = 10,
-         fontsize_col = 10,
-         main = "Top 20 Downregulated DEGs")
+         fontsize_row = 10, fontsize_col = 10,
+         main = "Top 20 Downregulated DEGs (Scaled Rows)")
+dev.off()
 
-top_up_list <- list()
-
-for (cond in comparisons) {
-  top_up <- de_list[[cond]] %>%
+# Top 20 per condition - upregulated
+top_up_all <- bind_rows(lapply(comparisons, function(cond) {
+  de_list[[cond]] %>%
     filter(avg_log2FC > 0.25, p_val_adj < 0.05) %>%
     arrange(p_val_adj, desc(avg_log2FC)) %>%
     distinct(gene, .keep_all = TRUE) %>%
     slice_head(n = 20) %>%
     mutate(condition = cond)
-  
-  top_up_list[[cond]] <- top_up
-}
+}))
 
-# Combine top 20 upregulated genes per condition
-top_up_all <- bind_rows(top_up_list)
-
-# Unique gene list
 top_up_genes_all <- unique(top_up_all$gene)
-
-# Subset expression matrix
 top_up_expr <- avg_mat[intersect(top_up_genes_all, rownames(avg_mat)), ]
+top_up_expr_scaled <- t(scale(t(top_up_expr)))
 
-# Optional: annotate gene origins for better visualization
-#gene_annotation <- top_up_all %>%
-#  select(gene, condition) %>%
-#  distinct() %>%
-#  column_to_rownames("gene")
-
-# Heatmap
-pheatmap(top_up_expr,
-         scale = "row",
-         cluster_cols = TRUE,
-         cluster_rows = FALSE,
+pdf("top20_upregulated_per_condition_heatmap_scaled_rows.pdf", width = 6, height = 8)
+pheatmap(top_up_expr_scaled,
+         cluster_cols = TRUE, cluster_rows = FALSE,
          show_rownames = TRUE,
-         #annotation_row = gene_annotation,
-         fontsize_row = 5,
-         fontsize_col = 10,
-         main = "Top 20 Upregulated Genes per Condition")
+         fontsize_row = 5, fontsize_col = 10,
+         main = "Top 20 Upregulated Genes per Condition (Scaled Rows)")
+dev.off()
 
-top_down_list <- list()
-
-for (cond in comparisons) {
-  top_down <- de_list[[cond]] %>%
+# Top 20 per condition - downregulated
+top_down_all <- bind_rows(lapply(comparisons, function(cond) {
+  de_list[[cond]] %>%
     filter(avg_log2FC < -0.25, p_val_adj < 0.05) %>%
     arrange(p_val_adj, avg_log2FC) %>%
     distinct(gene, .keep_all = TRUE) %>%
     slice_head(n = 20) %>%
     mutate(condition = cond)
-  
-  top_down_list[[cond]] <- top_down
-}
+}))
 
-# Combine top 20 downregulated genes per condition
-top_down_all <- bind_rows(top_down_list)
-
-# Unique gene list
 top_down_genes_all <- unique(top_down_all$gene)
-
-# Subset expression matrix
 top_down_expr <- avg_mat[intersect(top_down_genes_all, rownames(avg_mat)), ]
+top_down_expr_scaled <- t(scale(t(top_down_expr)))
 
-# Optional: annotate gene origins for better visualization
-#gene_annotation_down <- top_down_all %>%
-#  select(gene, condition) %>%
-#  distinct() %>%
-#  column_to_rownames("gene")
-
-# Heatmap
-pheatmap(top_down_expr,
-         scale = "row",
-         cluster_cols = TRUE,
-         cluster_rows = FALSE,
+pdf("top20_downregulated_per_condition_heatmap_scaled_rows.pdf", width = 6, height = 8)
+pheatmap(top_down_expr_scaled,
+         cluster_cols = TRUE, cluster_rows = FALSE,
          show_rownames = TRUE,
-         #annotation_row = gene_annotation_down,
-         fontsize_row = 5,
-         fontsize_col = 10,
-         main = "Top 20 Downregulated Genes per Condition")
+         fontsize_row = 5, fontsize_col = 10,
+         main = "Top 20 Downregulated Genes per Condition (Scaled Rows)")
+dev.off()
+
+______________________________________________________________________________________________________________
+
+
+
 
 
 
