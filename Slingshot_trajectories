@@ -1,0 +1,197 @@
+# Load required libraries
+library(Seurat)
+library(SingleCellExperiment)
+library(slingshot)
+library(RColorBrewer)
+library(scater)  # For plotting
+library(ggplot2)
+library(BiocManager)
+#BiocManager::install("slingshot")  # Only run once if not already installed
+
+# Load and convert Seurat object to SingleCellExperiment
+CM <- readRDS("CM_cells.rds")
+
+# Use RNA assay
+CM_sce <- as.SingleCellExperiment(CM, assay = "RNA")
+
+# Transfer UMAP coordinates (e.g., Harmony-corrected)
+reducedDims(CM_sce) <- SimpleList(UMAP = Embeddings(CM, "umap"))
+
+# Set identity based on condition
+Idents(CM) <- "origin"  # use 'origin' like Neo, A4T, A24, etc.
+CM_sce$cluster <- Idents(CM)
+
+# Run slingshot with Neo as starting point
+CM_sce <- slingshot(CM_sce, clusterLabels = 'cluster', reducedDim = 'UMAP', start.clus = "Neo")
+
+# Plot trajectory
+umap_coords <- reducedDims(CM_sce)$UMAP
+cols <- brewer.pal(length(unique(CM_sce$cluster)), "Set1")
+names(cols) <- unique(CM_sce$cluster)
+
+plot(umap_coords, col = cols[CM_sce$cluster], pch = 16, asp = 1, main = "Slingshot Trajectories")
+lines(SlingshotDataSet(CM_sce), lwd = 2)
+
+# Add cluster labels
+cluster_centers <- aggregate(umap_coords, by = list(cluster = CM_sce$cluster), FUN = mean)
+text(cluster_centers[,2:3], labels = cluster_centers[,1], col = "black", cex = 1.3, font = 2)
+
+# Assign trajectory types
+CM$trajectory_group <- ifelse(CM$origin %in% c("Neo", "D4", "A24", "D28"), "Aging",
+                              ifelse(CM$origin %in% c("Neo", "D4", "A4T"), "Disease", NA))
+
+# Plot UMAP colored by trajectory group
+DimPlot(CM, group.by = "trajectory_group", pt.size = 1) + 
+  ggtitle("Aging vs Disease Trajectories")
+
+# Extract pseudotime from both lineages
+pseudotime <- slingPseudotime(CM_sce)
+CM$pseudotime_aging <- pseudotime[, 1]
+if (ncol(pseudotime) > 1) {
+  CM$pseudotime_disease <- pseudotime[, 2]
+}
+
+# Plot pseudotime values on UMAP
+FeaturePlot(CM, features = "pseudotime_aging", cols = c("lightgrey", "red")) + ggtitle("Aging Pseudotime")
+FeaturePlot(CM, features = "pseudotime_disease", cols = c("lightgrey", "blue")) + ggtitle("Disease Pseudotime")
+
+
+##To plot with arrows
+
+
+# Extract Slingshot curves
+sds <- SlingshotDataSet(CM_sce)
+
+# Create a combined dataframe of all lineages
+curve_df <- lapply(names(sds@curves), function(name) {
+  curve <- sds@curves[[name]]
+  df <- as.data.frame(curve$s)
+  colnames(df) <- c("UMAP_1", "UMAP_2")
+  df$lineage <- name
+  return(df)
+})
+curve_df <- do.call(rbind, curve_df)
+
+# Create a UMAP data frame from the SingleCellExperiment
+umap_coords <- reducedDims(CM_sce)$UMAP
+umap_df <- as.data.frame(umap_coords)
+colnames(umap_df) <- c("UMAP_1", "UMAP_2")
+umap_df$cluster <- CM_sce$cluster
+
+# Load libraries
+library(ggplot2)
+library(grid)
+library(dplyr)
+
+# Plot
+ggplot(umap_df, aes(x = UMAP_1, y = UMAP_2, color = cluster)) +
+  geom_point(size = 1, alpha = 0.7) +
+  geom_path(data = curve_df, aes(x = UMAP_1, y = UMAP_2, group = lineage),
+            color = "black", linewidth = 1.2) +
+  geom_segment(
+    data = curve_df,
+    aes(
+      x = UMAP_1, y = UMAP_2,
+      xend = dplyr::lead(UMAP_1),
+      yend = dplyr::lead(UMAP_2),
+      group = lineage
+    ),
+    arrow = arrow(length = unit(0.1, "inches")),
+    color = "black",
+    na.rm = TRUE
+  ) +
+  theme_minimal() +
+  ggtitle("Slingshot Trajectories with Arrows") +
+  theme(legend.position = "right")
+
+
+.......................................................................................................
+
+# Subset to remove Neo
+CM_subset <- subset(CM, origin != "Neo")
+
+# Convert to SingleCellExperiment
+CM_sce <- as.SingleCellExperiment(CM_subset, assay = "RNA")
+
+# Set UMAP again
+reducedDims(CM_sce) <- SimpleList(UMAP = Embeddings(CM_subset, "umap"))
+
+# Set cluster identities (based on condition)
+Idents(CM_subset) <- "origin"
+CM_sce$cluster <- Idents(CM_subset)
+
+# Run Slingshot with D4 as the starting point
+CM_sce <- slingshot(CM_sce, clusterLabels = 'cluster', reducedDim = 'UMAP', start.clus = "D4")
+
+# Plot trajectory
+umap_coords <- reducedDims(CM_sce)$UMAP
+cols <- brewer.pal(length(unique(CM_sce$cluster)), "Set1")
+names(cols) <- unique(CM_sce$cluster)
+
+plot(umap_coords, col = cols[CM_sce$cluster], pch = 16, asp = 1, main = "Slingshot from D4")
+lines(SlingshotDataSet(CM_sce), lwd = 2)
+
+# Add text labels to clusters
+cluster_centers <- aggregate(umap_coords, by = list(cluster = CM_sce$cluster), FUN = mean)
+text(cluster_centers[,2:3], labels = cluster_centers[,1], col = "black", cex = 1.3, font = 2)
+
+# Extract pseudotime and store in Seurat object
+pseudotime <- slingPseudotime(CM_sce)
+CM_subset$pseudotime_from_D4 <- pseudotime[, 1]
+
+# Plot pseudotime on UMAP
+FeaturePlot(CM_subset, features = "pseudotime_from_D4", cols = c("lightgrey", "red")) +
+  ggtitle("Pseudotime Trajectory from D4")
+
+# Extract Slingshot curves
+sds <- SlingshotDataSet(CM_sce)
+
+# Create a combined dataframe of all lineages
+curve_df <- lapply(names(sds@curves), function(name) {
+  curve <- sds@curves[[name]]
+  df <- as.data.frame(curve$s)
+  colnames(df) <- c("UMAP_1", "UMAP_2")
+  df$lineage <- name
+  return(df)
+})
+curve_df <- do.call(rbind, curve_df)
+
+# Create a UMAP data frame from the SingleCellExperiment
+umap_coords <- reducedDims(CM_sce)$UMAP
+umap_df <- as.data.frame(umap_coords)
+colnames(umap_df) <- c("UMAP_1", "UMAP_2")
+umap_df$cluster <- CM_sce$cluster
+
+# Load libraries
+library(ggplot2)
+library(grid)
+library(dplyr)
+
+# Plot
+ggplot(umap_df, aes(x = UMAP_1, y = UMAP_2, color = cluster)) +
+  geom_point(size = 1, alpha = 0.7) +
+  geom_path(data = curve_df, aes(x = UMAP_1, y = UMAP_2, group = lineage),
+            color = "black", linewidth = 1.2) +
+  geom_segment(
+    data = curve_df,
+    aes(
+      x = UMAP_1, y = UMAP_2,
+      xend = dplyr::lead(UMAP_1),
+      yend = dplyr::lead(UMAP_2),
+      group = lineage
+    ),
+    arrow = arrow(length = unit(0.1, "inches")),
+    color = "black",
+    na.rm = TRUE
+  ) +
+  theme_minimal() +
+  ggtitle("Slingshot Trajectories with Arrows") +
+  theme(legend.position = "right")
+
+
+plot(umap_coords, col = cols[CM_sce$cluster], pch = 16, asp = 1, main = "Slingshot Trajectories")
+lines(SlingshotDataSet(CM_sce), lwd = 2)
+
+# Add cluster labels
+cluster_centers <- aggregate(umap_coords, by = list(cluster = CM_sce$cluster), FUN = mean)
+text(cluster_centers[,2:3], labels = cluster_centers[,1], col = "black", cex = 1.3, font = 2)
