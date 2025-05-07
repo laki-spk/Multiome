@@ -195,3 +195,174 @@ lines(SlingshotDataSet(CM_sce), lwd = 2)
 # Add cluster labels
 cluster_centers <- aggregate(umap_coords, by = list(cluster = CM_sce$cluster), FUN = mean)
 text(cluster_centers[,2:3], labels = cluster_centers[,1], col = "black", cex = 1.3, font = 2)
+
+
+
+................................................................................................
+
+# Get pseudotime matrix
+pt <- slingPseudotime(CM_sce)
+
+CM_subset$lineage <- apply(pt, 1, function(x) {
+  if (!is.na(x[1]) & is.na(x[2])) {
+    return("Lineage2")  # TAC (A4T)
+  } else if (is.na(x[1]) & !is.na(x[2])) {
+    return("Lineage1")  # Aging (D28)
+  } else if (!is.na(x[1]) & !is.na(x[2])) {
+    return("Shared")
+  } else {
+    return(NA)
+  }
+})
+
+
+table(CM_subset$lineage, CM_subset$origin)
+
+
+
+library(ggplot2)
+# Cell cycle genes (S phase + G2/M phase markers)
+CellCycle_Genes <- list(c(
+  "Mki67", "Pcna", "Top2a", "Ccnb1", "Ccnb2", "Cdk1", "Cdc20", "Ube2c", "Aurkb", "Birc5"
+))
+
+# Mitochondrial genes (OXPHOS components or mitochondrial-encoded)
+Mitochondrial_Genes <- list(c(
+  "Ndufa1", "Ndufb3", "Cox6a1", "Cox7a2", "Atp5j", "Atp5f1a", "Uqcrc1", "Sdha", "Ndufs2", "Uqcrh"
+))
+
+# Inflammatory genes (cytokines, chemokines, etc.)
+Inflammatory_Genes <- list(c(
+  "Il1b", "Tnf", "Ccl2", "Ccl3", "Cxcl1", "Nfkbia", "Stat1", "Tlr2", "Tlr4", "Il6"
+))
+
+CM_subset <- AddModuleScore(CM_subset, features = CellCycle_Genes, name = "CellCycle")
+CM_subset <- AddModuleScore(CM_subset, features = Mitochondrial_Genes, name = "Mito")
+CM_subset <- AddModuleScore(CM_subset, features = Inflammatory_Genes, name = "Inflammation")
+
+FeaturePlot(CM_subset, features = c("CellCycle1", "Mito1", "Inflammation1"))
+
+CM_subset$pseudotime_L2 <- pseudotime[, 1]  # Lineage2 (TAC)
+CM_subset$pseudotime_L1 <- pseudotime[, 2]  # Lineage1 (Aging)
+
+CM_subset$pseudotime_by_lineage <- NA
+CM_subset$pseudotime_by_lineage[CM_subset$lineage == "Lineage1"] <- CM_subset$pseudotime_L1[CM_subset$lineage == "Lineage1"]
+CM_subset$pseudotime_by_lineage[CM_subset$lineage == "Lineage2"] <- CM_subset$pseudotime_L2[CM_subset$lineage == "Lineage2"]
+CM_subset$pseudotime_by_lineage[CM_subset$lineage == "Shared"] <- rowMeans(pseudotime[CM_subset$lineage == "Shared", ], na.rm = TRUE)
+
+
+FeatureScatter(CM_subset, feature1 = "pseudotime_by_lineage", feature2 = "CellCycle1", group.by = "lineage") +
+  ggtitle("Cell Cycle Score over Pseudotime")
+
+df <- FetchData(CM_subset, vars = c("pseudotime_by_lineage", "CellCycle1", "lineage"))
+ggplot(df, aes(x = pseudotime_by_lineage, y = CellCycle1, color = lineage)) +
+  geom_smooth() +
+  ggtitle("Cell Cycle Dynamics across Lineages")
+
+# Fetch data
+df <- FetchData(CM_subset, vars = c("pseudotime_by_lineage", "CellCycle1", "Mito1", "Inflammation1", "lineage"))
+
+# Convert to long format for ggplot
+library(tidyr)
+df_long <- df %>%
+  pivot_longer(cols = c("CellCycle1", "Mito1", "Inflammation1"),
+               names_to = "GeneProgram", values_to = "ModuleScore")
+
+df_long$lineage <- factor(df_long$lineage,
+                          levels = c("Lineage1", "Lineage2", "Shared"),
+                          labels = c("Aging", "TAC", "Shared"))
+
+df_long <- df_long[order(df_long$pseudotime_by_lineage), ]
+
+library(ggplot2)
+
+ggplot(df_long, aes(x = pseudotime_by_lineage, y = ModuleScore, color = lineage)) +
+  geom_smooth(se = FALSE, linewidth = 1.2) +
+  facet_wrap(~GeneProgram, scales = "free_y") + #can use scales =  "Fixed" to compare across gene programs
+  labs(title = "Gene Program Dynamics across Pseudotime",
+       x = "Pseudotime", y = "Module Score") +
+  theme_minimal(base_size = 14)
+
+
+# View cluster orderings for each lineage
+sds <- SlingshotDataSet(CM_sce)
+sds@lineages
+
+
+FeatureScatter(CM_subset, feature1 = "pseudotime_from_D4", feature2 = "CellCycle1", group.by = "lineage") +
+  ggtitle("Cell Cycle Score over Pseudotime")
+
+FeatureScatter(CM_subset, feature1 = "pseudotime_from_D4", feature2 = "Mito1", group.by = "lineage") +
+  ggtitle("Mitochondrial Score over Pseudotime")
+
+FeatureScatter(CM_subset, feature1 = "pseudotime_from_D4", feature2 = "Inflammation1", group.by = "lineage") +
+  ggtitle("Inflammation Score over Pseudotime")
+
+df <- FetchData(CM_subset, vars = c("pseudotime_from_D4", "CellCycle1", "lineage"))
+ggplot(df, aes(x = pseudotime_from_D4, y = CellCycle1, color = lineage)) +
+  geom_smooth() +
+  ggtitle("Cell Cycle Dynamics across Lineages")
+
+DimPlot(CM_subset, group.by = "origin", reduction = "umap", label = TRUE) +
+  geom_path(data = curve_df, aes(x = UMAP_1, y = UMAP_2, group = lineage), 
+            color = "black", linewidth = 1.2)
+
+
+table(CM_subset$lineage, CM_subset$origin)
+
+
+
+library(tradeSeq)
+# Extract aligned counts from the filtered Seurat object
+counts <- as.matrix(GetAssayData(CM_subset, assay = "RNA", slot = "counts"))
+
+# Extract pseudotime and cell weights from Slingshot result on filtered SCE
+pseudotime <- slingPseudotime(CM_sce)
+cellWeights <- slingCurveWeights(CM_sce)
+
+# Optional: double-check dimensions match
+stopifnot(identical(rownames(pseudotime), colnames(counts)))
+
+# Identify cells with valid pseudotime in *any* lineage
+valid_cells <- rowSums(is.na(pseudotime)) < ncol(pseudotime)
+
+# Subset all inputs
+counts_filtered <- counts[, valid_cells]
+pseudotime_filtered <- pseudotime[valid_cells, ]
+cellWeights_filtered <- cellWeights[valid_cells, ]
+
+# Double-check dimensions match
+stopifnot(ncol(counts_filtered) == nrow(pseudotime_filtered),
+          ncol(counts_filtered) == nrow(cellWeights_filtered))
+
+# Fit the model
+sce_gam <- fitGAM(counts = counts_filtered,
+                  pseudotime = pseudotime_filtered,
+                  cellWeights = cellWeights_filtered,
+                  nknots = 6,
+                  verbose = TRUE)
+
+
+# Keep only cells with NO NA values in any lineage
+valid_cells <- rowSums(is.na(pseudotime)) == 0
+
+counts_filtered <- counts[, valid_cells]
+pseudotime_filtered <- pseudotime[valid_cells, ]
+cellWeights_filtered <- cellWeights[valid_cells, ]
+
+# Check dimensions again
+stopifnot(ncol(counts_filtered) == nrow(pseudotime_filtered),
+          ncol(counts_filtered) == nrow(cellWeights_filtered))
+
+# Fit the model
+sce_gam <- fitGAM(counts = counts_filtered,
+                  pseudotime = pseudotime_filtered,
+                  cellWeights = cellWeights_filtered,
+                  nknots = 6,
+                  verbose = TRUE)
+
+
+
+
+
+
