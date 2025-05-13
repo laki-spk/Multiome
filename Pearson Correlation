@@ -5,7 +5,7 @@ library(ggrepel)
 library(reshape2)
 
 ## Step 2: Load Seurat Object and Extract Counts
-CM_cells <- readRDS("CM_cells.rds")
+CM_cells <- readRDS("FB_cells.rds")
 
 # Filter only the origins of interest
 CM_subset <- subset(CM_cells, subset = origin %in% c("Neo", "D4", "D28", "A4T"))
@@ -171,9 +171,6 @@ plot_volcano_labeled(de_D28, "Volcano Plot: D28 vs D4 (Top Genes)")
 
 
 
-# Load your data
-CM_cells <- readRDS("CM_cells.rds")
-
 # Subset
 D4_cells <- subset(CM_cells, subset = origin == "D4")
 D28_cells <- subset(CM_cells, subset = origin == "D28")
@@ -323,13 +320,13 @@ library(clusterProfiler)
 library(org.Mm.eg.db)
 
 # Filter genes
-sig_up_TAC <- rownames(de_TAC[de_TAC$p_val_adj < 0.05 & de_TAC$avg_log2FC > 1, ])
-sig_down_TAC <- rownames(de_TAC[de_TAC$p_val_adj < 0.05 & de_TAC$avg_log2FC > -1, ])
+sig_up_TAC <- rownames(de_TAC[de_TAC$p_val_adj < 0.05 & de_TAC$avg_log2FC > 0.25, ])
+sig_down_TAC <- rownames(de_TAC[de_TAC$p_val_adj < 0.05 & de_TAC$avg_log2FC < -0.25, ])
 # Map gene symbols to Entrez IDs (required for enrichGO)
 entrez_up_TAC <- bitr(sig_up_TAC, fromType = "SYMBOL", 
                       toType = "ENTREZID", OrgDb = org.Mm.eg.db)
 entrez_down_TAC <- bitr(sig_down_TAC, fromType = "SYMBOL", 
-                      toType = "ENTREZID", OrgDb = org.Mm.eg.db)
+                        toType = "ENTREZID", OrgDb = org.Mm.eg.db)
 # Run GO enrichment (Biological Process)
 ego_up_TAC <- enrichGO(gene = entrez_up_TAC$ENTREZID,
                        OrgDb = org.Mm.eg.db,
@@ -338,35 +335,35 @@ ego_up_TAC <- enrichGO(gene = entrez_up_TAC$ENTREZID,
                        qvalueCutoff = 0.05,
                        readable = TRUE)
 ego_down_TAC <- enrichGO(gene = entrez_down_TAC$ENTREZID,
-                       OrgDb = org.Mm.eg.db,
-                       ont = "BP",
-                       pAdjustMethod = "BH",
-                       qvalueCutoff = 0.05,
-                       readable = TRUE)                       
+                         OrgDb = org.Mm.eg.db,
+                         ont = "BP",
+                         pAdjustMethod = "BH",
+                         qvalueCutoff = 0.05,
+                         readable = TRUE)                       
 
 barplot(ego_up_TAC, showCategory = 10, title = "GO terms - Upregulated in TAC vs 4M")
 barplot(ego_down_TAC, showCategory = 10, title = "GO terms - Downregulated in TAC vs 4M")
 
-sig_up_aged <- rownames(de_28M[de_28M$p_val_adj < 0.05 & de_28M$avg_log2FC > 1, ])
-sig_down_aged <- rownames(de_28M[de_28M$p_val_adj < 0.05 & de_28M$avg_log2FC > -1, ])
+sig_up_aged <- rownames(de_28M[de_28M$p_val_adj < 0.05 & de_28M$avg_log2FC > 0.25, ])
+sig_down_aged <- rownames(de_28M[de_28M$p_val_adj < 0.05 & de_28M$avg_log2FC < -0.25, ])
 # Map gene symbols to Entrez IDs (required for enrichGO)
 entrez_up_aged <- bitr(sig_up_aged, fromType = "SYMBOL", 
-                      toType = "ENTREZID", OrgDb = org.Mm.eg.db)
-entrez_down_aged <- bitr(sig_down_aged, fromType = "SYMBOL", 
                        toType = "ENTREZID", OrgDb = org.Mm.eg.db)
+entrez_down_aged <- bitr(sig_down_aged, fromType = "SYMBOL", 
+                         toType = "ENTREZID", OrgDb = org.Mm.eg.db)
 # Run GO enrichment (Biological Process)
 ego_up_aged <- enrichGO(gene = entrez_up_aged$ENTREZID,
-                       OrgDb = org.Mm.eg.db,
-                       ont = "BP",
-                       pAdjustMethod = "BH",
-                       qvalueCutoff = 0.05,
-                       readable = TRUE)
-ego_down_aged <- enrichGO(gene = entrez_down_aged$ENTREZID,
                         OrgDb = org.Mm.eg.db,
                         ont = "BP",
                         pAdjustMethod = "BH",
                         qvalueCutoff = 0.05,
                         readable = TRUE)
+ego_down_aged <- enrichGO(gene = entrez_down_aged$ENTREZID,
+                          OrgDb = org.Mm.eg.db,
+                          ont = "BP",
+                          pAdjustMethod = "BH",
+                          qvalueCutoff = 0.05,
+                          readable = TRUE)
 
 
 barplot(ego_up_aged, showCategory = 10, title = "GO terms - Upregulated in 28M vs 4M", font.size = 8)
