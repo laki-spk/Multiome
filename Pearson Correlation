@@ -1,0 +1,403 @@
+library(Seurat)
+library(edgeR)
+library(ggplot2)
+library(ggrepel)
+library(reshape2)
+
+## Step 2: Load Seurat Object and Extract Counts
+CM_cells <- readRDS("CM_cells.rds")
+
+# Filter only the origins of interest
+CM_subset <- subset(CM_cells, subset = origin %in% c("Neo", "D4", "D28", "A4T"))
+
+# Extract raw counts and metadata
+counts <- GetAssayData(CM_subset, slot = "counts")
+meta <- CM_subset@meta.data
+
+##Step 3: Prepare EdgeR Input
+# Grouping factor
+group <- factor(meta$origin, levels = c("D4", "A4T", "D28", "Neo"))
+
+# Create DGEList
+dge <- DGEList(counts = counts, group = group)
+
+# Filter lowly expressed genes
+keep <- filterByExpr(dge)
+dge <- dge[keep, , keep.lib.sizes=FALSE]
+
+# Normalize
+dge <- calcNormFactors(dge)
+
+
+##Step 4: Differential Expression Analysis with EdgeR
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+
+dge <- estimateDisp(dge, design)
+fit <- glmQLFit(dge, design)
+
+# Get contrasts
+contrast_D28_vs_D4 <- makeContrasts(D28 - D4, levels=design)
+contrast_A4T_vs_D4 <- makeContrasts(A4T - D4, levels=design)
+contrast_Neo_vs_D4 <- makeContrasts(Neo - D4, levels=design)
+
+# Run QL tests
+res_D28 <- glmQLFTest(fit, contrast = contrast_D28_vs_D4)
+res_A4T <- glmQLFTest(fit, contrast = contrast_A4T_vs_D4)
+res_Neo <- glmQLFTest(fit, contrast = contrast_Neo_vs_D4)
+
+# Convert to data frames
+de_D28 <- topTags(res_D28, n=Inf)$table
+de_A4T <- topTags(res_A4T, n=Inf)$table
+de_Neo <- topTags(res_Neo, n=Inf)$table
+
+# Add gene column
+de_D28$gene <- rownames(de_D28)
+de_A4T$gene <- rownames(de_A4T)
+de_Neo$gene <- rownames(de_Neo)
+
+
+##Step:5 Create Pearson Correlation Plot (logFC D28 vs A4T)
+
+# Merge on genes
+merged <- merge(de_D28[, c("gene", "logFC")], 
+                de_A4T[, c("gene", "logFC")], 
+                by = "gene", suffixes = c("_D28", "_A4T"))
+
+correlation <- cor(merged$logFC_D28, merged$logFC_A4T, method = "pearson")
+print(paste("Pearson correlation:", round(correlation, 3)))
+
+ggplot(merged, aes(x = logFC_A4T, y = logFC_D28)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", color = "red") +
+  ggtitle(paste("Pearson correlation = ", round(correlation, 3))) +
+  theme_minimal() +
+  xlab("logFC A4T vs D4") +
+  ylab("logFC D28 vs D4")
+
+
+##Step 6: Scatter Plots of FC Comparisons
+
+#D28 vs D4 (y-axis) vs A4T vs D4 (x-axis)
+ggplot(merged, aes(x = logFC_A4T, y = logFC_D28)) +
+  geom_point(alpha = 0.4) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  xlab("logFC A4T vs D4") +
+  ylab("logFC D28 vs D4") +
+  ggtitle("Scatter: D28 vs D4 vs A4T vs D4") +
+  theme_minimal()
+
+#Neo vs D4 (y-axis) vs A4T vs D4 (x-axis)
+merged_neo <- merge(de_Neo[, c("gene", "logFC")],
+                    de_A4T[, c("gene", "logFC")],
+                    by = "gene", suffixes = c("_Neo", "_A4T"))
+
+ggplot(merged_neo, aes(x = logFC_A4T, y = logFC_Neo)) +
+  geom_point(alpha = 0.4) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  xlab("logFC A4T vs D4") +
+  ylab("logFC Neo vs D4") +
+  ggtitle("Scatter: Neo vs D4 vs A4T vs D4") +
+  theme_minimal()
+
+#Highlight Top Up/Downregulated Genes
+merged$label <- ifelse((abs(merged$logFC_D28) > 0.25 & abs(merged$logFC_A4T) > 0.25), merged$gene, NA)
+
+ggplot(merged, aes(x = logFC_A4T, y = logFC_D28)) +
+  geom_point(alpha = 0.4) +
+  geom_text_repel(aes(label = label), size = 3) +
+  xlab("logFC A4T vs D4") +
+  ylab("logFC D28 vs D4") +
+  ggtitle("Labeled Scatter Plot") +
+  theme_minimal()
+
+
+plot_volcano <- function(df, title) {
+  df$threshold <- "Not Significant"
+  df$threshold[df$FDR < 0.05 & df$logFC > 0.25] <- "Upregulated"
+  df$threshold[df$FDR < 0.05 & df$logFC < -0.25] <- "Downregulated"
+  
+  ggplot(df, aes(x = logFC, y = -log10(FDR), color = threshold)) +
+    geom_point(alpha = 0.6, size = 1.5) +
+    scale_color_manual(values = c("Upregulated" = "red", 
+                                  "Downregulated" = "blue", 
+                                  "Not Significant" = "grey")) +
+    theme_minimal() +
+    xlab("log2 Fold Change") +
+    ylab("-log10(FDR)") +
+    ggtitle(title) +
+    geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed") +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed")
+}
+
+plot_volcano(de_D28, "Volcano Plot: D28 vs D4")
+plot_volcano(de_A4T, "Volcano Plot: A4T vs D4")
+plot_volcano(de_Neo, "Volcano Plot: Neo vs D4")
+
+library(ggrepel)
+
+plot_volcano_labeled <- function(df, title, top_n = 10, ylimit = 500) {
+  df$threshold <- "Not Significant"
+  df$threshold[df$FDR < 0.05 & df$logFC > 0.25] <- "Upregulated"
+  df$threshold[df$FDR < 0.05 & df$logFC < -0.25] <- "Downregulated"
+  
+  df$label <- NA
+  top_genes <- rbind(
+    head(df[order(df$logFC, decreasing = TRUE) & df$FDR < 0.05, ], top_n),
+    head(df[order(df$logFC, decreasing = FALSE) & df$FDR < 0.05, ], top_n)
+  )
+  df$label[match(top_genes$gene, df$gene)] <- top_genes$gene
+  
+  ggplot(df, aes(x = logFC, y = -log10(FDR), color = threshold)) +
+    geom_point(alpha = 0.6, size = 1.5) +
+    scale_color_manual(values = c("Upregulated" = "red", 
+                                  "Downregulated" = "blue", 
+                                  "Not Significant" = "grey")) +
+    geom_text_repel(aes(label = label), max.overlaps = Inf, size = 3) +
+    theme_minimal() +
+    xlab("log2 Fold Change") +
+    ylab("-log10(FDR)") +
+    ggtitle(title) +
+    geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed") +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+    coord_cartesian(ylim = c(0, ylimit))
+}
+
+
+# Example usage:
+plot_volcano_labeled(de_D28, "Volcano Plot: D28 vs D4 (Top Genes)")
+
+
+
+# Load your data
+CM_cells <- readRDS("CM_cells.rds")
+
+# Subset
+D4_cells <- subset(CM_cells, subset = origin == "D4")
+D28_cells <- subset(CM_cells, subset = origin == "D28")
+A4T_cells <- subset(CM_cells, subset = origin == "A4T")
+
+# Use log-normalized values
+avg_D4 <- AverageExpression(D4_cells, assays = "RNA", slot = "data")$RNA
+avg_D28 <- AverageExpression(D28_cells, assays = "RNA", slot = "data")$RNA
+avg_A4T <- AverageExpression(A4T_cells, assays = "RNA", slot = "data")$RNA
+
+# Merge and compute log2 fold changes (adding small value to avoid log(0))
+avg_expr <- data.frame(
+  gene = rownames(avg_D4),
+  D4 = avg_D4[,1],
+  D28 = avg_D28[,1],
+  A4T = avg_A4T[,1]
+)
+
+avg_expr$logFC_D28_vs_D4 <- log2(avg_expr$D28 + 1e-6) - log2(avg_expr$D4 + 1e-6)
+avg_expr$logFC_A4T_vs_D4 <- log2(avg_expr$A4T + 1e-6) - log2(avg_expr$D4 + 1e-6)
+
+cor_D28 <- cor(avg_expr$logFC_D28_vs_D4, log2(avg_expr$D4 + 1e-6), method = "pearson")
+
+ggplot(avg_expr, aes(x = log2(D4 + 1e-6), y = logFC_D28_vs_D4)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", color = "red") +
+  ggtitle(paste("D28 vs D4 logFC | Pearson r =", round(cor_D28, 3))) +
+  xlab("log2(D4 Expression)") +
+  ylab("log2FC D28 vs D4") +
+  theme_minimal()
+
+cor_A4T <- cor(avg_expr$logFC_A4T_vs_D4, log2(avg_expr$D4 + 1e-6), method = "pearson")
+
+ggplot(avg_expr, aes(x = log2(D4 + 1e-6), y = logFC_A4T_vs_D4)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", color = "red") +
+  ggtitle(paste("A4T vs D4 logFC | Pearson r =", round(cor_A4T, 3))) +
+  xlab("log2(D4 Expression)") +
+  ylab("log2FC A4T vs D4") +
+  theme_minimal()
+
+var_genes <- VariableFeatures(CM_cells)
+
+# Filter to variable genes
+avg_expr_var <- avg_expr[avg_expr$gene %in% var_genes, ]
+
+cor_D28 <- cor(avg_expr_var$logFC_D28_vs_D4, log2(avg_expr_var$D4 + 1e-6), method = "pearson")
+
+ggplot(avg_expr_var, aes(x = log2(D4 + 1e-6), y = logFC_D28_vs_D4)) +
+  geom_point(alpha = 0.5, color = "steelblue") +
+  geom_smooth(method = "lm", color = "red", se = FALSE) +
+  ggtitle(paste("D28 vs D4 (Variable Genes)\nPearson r =", round(cor_D28, 3))) +
+  xlab("log2(D4 Expression)") +
+  ylab("log2FC D28 vs D4") +
+  theme_minimal()
+
+cor_A4T <- cor(avg_expr_var$logFC_A4T_vs_D4, log2(avg_expr_var$D4 + 1e-6), method = "pearson")
+
+ggplot(avg_expr_var, aes(x = log2(D4 + 1e-6), y = logFC_A4T_vs_D4)) +
+  geom_point(alpha = 0.5, color = "darkgreen") +
+  geom_smooth(method = "lm", color = "red", se = FALSE) +
+  ggtitle(paste("A4T vs D4 (Variable Genes)\nPearson r =", round(cor_A4T, 3))) +
+  xlab("log2(D4 Expression)") +
+  ylab("log2FC A4T vs D4") +
+  theme_minimal()
+
+cor_both <- cor(avg_expr_var$logFC_D28_vs_D4, avg_expr_var$logFC_A4T_vs_D4, method = "pearson")
+
+ggplot(avg_expr_var, aes(x = logFC_A4T_vs_D4, y = logFC_D28_vs_D4)) +
+  geom_point(alpha = 0.5, color = "purple") +
+  geom_smooth(method = "lm", color = "red", se = FALSE) +
+  ggtitle(paste("logFC: A4T vs D28 (Variable Genes)\nPearson r =", round(cor_both, 3))) +
+  xlab("log2FC A4T vs D4") +
+  ylab("log2FC D28 vs D4") +
+  theme_minimal()
+
+Idents(CM_cells) <- "origin"
+
+de_TAC <- FindMarkers(CM_cells, ident.1 = "A4T", ident.2 = "D4", logfc.threshold = 0.25)
+de_28M <- FindMarkers(CM_cells, ident.1 = "D28", ident.2 = "D4", logfc.threshold = 0.25)
+
+##Step 2: Volcano plots
+# For TAC vs 4M
+de_TAC$gene <- rownames(de_TAC)
+
+top_up_TAC <- de_TAC[de_TAC$avg_log2FC > 0.25 & de_TAC$p_val_adj < 0.05, ]
+top_up_TAC <- top_up_TAC[order(-top_up_TAC$avg_log2FC), ][1:50, ]
+
+top_down_TAC <- de_TAC[de_TAC$avg_log2FC < -0.25 & de_TAC$p_val_adj < 0.05, ]
+top_down_TAC <- top_down_TAC[order(top_down_TAC$avg_log2FC), ][1:50, ]
+
+top_genes_TAC <- c(top_up_TAC$gene, top_down_TAC$gene)
+
+# Create labels: only show top 20
+de_TAC$label <- ifelse(rownames(de_TAC) %in% top_genes_TAC, rownames(de_TAC), "")
+
+EnhancedVolcano(de_TAC,
+                lab = de_TAC$label,
+                x = 'avg_log2FC',
+                y = 'p_val_adj',
+                title = 'TAC vs 4M',
+                pCutoff = 0.05,
+                FCcutoff = 0.25)
+
+de_28M$gene <- rownames(de_28M)
+
+top_up_28M <- de_28M[de_28M$avg_log2FC > 0.25 & de_28M$p_val_adj < 0.05, ]
+top_up_28M <- top_up_28M[order(-top_up_28M$avg_log2FC), ][1:10, ]
+
+top_down_28M <- de_28M[de_28M$avg_log2FC < -0.25 & de_28M$p_val_adj < 0.05, ]
+top_down_28M <- top_down_28M[order(top_down_28M$avg_log2FC), ][1:10, ]
+
+top_genes_28M <- c(top_up_28M$gene, top_down_28M$gene)
+
+de_28M$label <- ifelse(rownames(de_28M) %in% top_genes_28M, rownames(de_28M), "")
+
+EnhancedVolcano(de_28M,
+                lab = de_28M$label,
+                x = 'avg_log2FC',
+                y = 'p_val_adj',
+                title = '28M vs 4M',
+                pCutoff = 0.05,
+                FCcutoff = 0.25)
+
+library(EnhancedVolcano)
+
+EnhancedVolcano(de_TAC,
+                lab = rownames(de_TAC),
+                x = 'avg_log2FC',
+                y = 'p_val_adj',
+                title = 'TAC vs 4M',
+                pCutoff = 0.05,
+                FCcutoff = 1,
+                labSize = 3)
+
+EnhancedVolcano(de_28M,
+                lab = rownames(de_28M),
+                x = 'avg_log2FC',
+                y = 'p_val_adj',
+                title = '28M vs 4M',
+                pCutoff = 0.05,
+                FCcutoff = 1,
+                labSize = 3)
+
+
+library(clusterProfiler)
+library(org.Mm.eg.db)
+
+# Filter genes
+sig_up_TAC <- rownames(de_TAC[de_TAC$p_val_adj < 0.05 & de_TAC$avg_log2FC > 1, ])
+sig_down_TAC <- rownames(de_TAC[de_TAC$p_val_adj < 0.05 & de_TAC$avg_log2FC > -1, ])
+# Map gene symbols to Entrez IDs (required for enrichGO)
+entrez_up_TAC <- bitr(sig_up_TAC, fromType = "SYMBOL", 
+                      toType = "ENTREZID", OrgDb = org.Mm.eg.db)
+entrez_down_TAC <- bitr(sig_down_TAC, fromType = "SYMBOL", 
+                      toType = "ENTREZID", OrgDb = org.Mm.eg.db)
+# Run GO enrichment (Biological Process)
+ego_up_TAC <- enrichGO(gene = entrez_up_TAC$ENTREZID,
+                       OrgDb = org.Mm.eg.db,
+                       ont = "BP",
+                       pAdjustMethod = "BH",
+                       qvalueCutoff = 0.05,
+                       readable = TRUE)
+ego_down_TAC <- enrichGO(gene = entrez_down_TAC$ENTREZID,
+                       OrgDb = org.Mm.eg.db,
+                       ont = "BP",
+                       pAdjustMethod = "BH",
+                       qvalueCutoff = 0.05,
+                       readable = TRUE)                       
+
+barplot(ego_up_TAC, showCategory = 10, title = "GO terms - Upregulated in TAC vs 4M")
+barplot(ego_down_TAC, showCategory = 10, title = "GO terms - Downregulated in TAC vs 4M")
+
+sig_up_aged <- rownames(de_28M[de_28M$p_val_adj < 0.05 & de_28M$avg_log2FC > 1, ])
+sig_down_aged <- rownames(de_28M[de_28M$p_val_adj < 0.05 & de_28M$avg_log2FC > -1, ])
+# Map gene symbols to Entrez IDs (required for enrichGO)
+entrez_up_aged <- bitr(sig_up_aged, fromType = "SYMBOL", 
+                      toType = "ENTREZID", OrgDb = org.Mm.eg.db)
+entrez_down_aged <- bitr(sig_down_aged, fromType = "SYMBOL", 
+                       toType = "ENTREZID", OrgDb = org.Mm.eg.db)
+# Run GO enrichment (Biological Process)
+ego_up_aged <- enrichGO(gene = entrez_up_aged$ENTREZID,
+                       OrgDb = org.Mm.eg.db,
+                       ont = "BP",
+                       pAdjustMethod = "BH",
+                       qvalueCutoff = 0.05,
+                       readable = TRUE)
+ego_down_aged <- enrichGO(gene = entrez_down_aged$ENTREZID,
+                        OrgDb = org.Mm.eg.db,
+                        ont = "BP",
+                        pAdjustMethod = "BH",
+                        qvalueCutoff = 0.05,
+                        readable = TRUE)
+
+
+barplot(ego_up_aged, showCategory = 10, title = "GO terms - Upregulated in 28M vs 4M", font.size = 8)
+barplot(ego_down_aged, showCategory = 10, title = "GO terms - Downregulated in 28M vs 4M", font.size = 8)
+
+library(patchwork)
+
+p1 <- EnhancedVolcano(de_TAC,
+                      lab = rownames(de_TAC),
+                      x = 'avg_log2FC',
+                      y = 'p_val_adj',
+                      title = 'TAC vs 4M',
+                      pCutoff = 0.05,
+                      FCcutoff = 1,
+                      labSize = 3)
+p2 <- barplot(ego_up_TAC, showCategory = 10, title = "GO terms - Upregulated in TAC vs 4M", font.size = 8)
+P3 <- barplot(ego_down_TAC, showCategory = 10, title = "GO terms - Downregulated in TAC vs 4M", font.size = 8)
+
+p4 <- p2 + P3 + plot_layout(nrow = 2)
+p1 + p4 + plot_layout(ncol = 2)
+
+p5 <- EnhancedVolcano(de_28M,
+                      lab = rownames(de_28M),
+                      x = 'avg_log2FC',
+                      y = 'p_val_adj',
+                      title = '28M vs 4M',
+                      pCutoff = 0.05,
+                      FCcutoff = 1,
+                      labSize = 3)
+p6 <- barplot(ego_up_aged, showCategory = 10, title = "GO terms - Upregulated in 28M vs 4M", font.size = 8)
+P7 <- barplot(ego_down_aged, showCategory = 10, title = "GO terms - Downregulated 28M vs 4M", font.size = 8)
+
+p8 <- p6 + P7 + plot_layout(nrow = 2)
+p5 + p8 + plot_layout(ncol = 2)
