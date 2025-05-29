@@ -158,7 +158,6 @@ gene_clusters <- data.frame(
 write.csv(gene_clusters, "gene_clusters_down_kmeans_10.csv", row.names = FALSE)
 
 
-
 ________________________________________________________________________________________________________
 
 # Top 20 upregulated genes
