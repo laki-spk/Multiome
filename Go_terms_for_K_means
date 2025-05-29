@@ -1,0 +1,84 @@
+# Load necessary libraries
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(ggplot2)
+
+# Read the CSV file containing the upregulated DEGs and clusters
+gene_clusters <- read.csv("gene_clusters_up_kmeans_5.csv")
+
+# View the first few rows to inspect
+head(gene_clusters)
+
+# Extract genes for each cluster
+cluster1_genes <- gene_clusters$gene[gene_clusters$cluster == 1]
+cluster2_genes <- gene_clusters$gene[gene_clusters$cluster == 2]
+cluster3_genes <- gene_clusters$gene[gene_clusters$cluster == 3]
+cluster4_genes <- gene_clusters$gene[gene_clusters$cluster == 4]
+cluster5_genes <- gene_clusters$gene[gene_clusters$cluster == 5]
+
+# Combine genes from Cluster 2 and Cluster 4
+combined_gene_list <- c(cluster2_genes, cluster4_genes)
+
+# Perform GO enrichment analysis
+go_cluster1 <- enrichGO(gene = cluster1_genes, 
+                        OrgDb = org.Mm.eg.db,   
+                        keyType = "SYMBOL", 
+                        ont = "BP",             
+                        pvalueCutoff = 0.05)
+
+go_cluster2 <- enrichGO(gene = cluster2_genes, 
+                        OrgDb = org.Mm.eg.db,   
+                        keyType = "SYMBOL", 
+                        ont = "BP",             
+                        pvalueCutoff = 0.05)
+
+go_combined <- enrichGO(gene = combined_gene_list, 
+                        OrgDb = org.Mm.eg.db,
+                        keyType = "SYMBOL", 
+                        ont = "BP", 
+                        pvalueCutoff = 0.05)
+
+go_cluster3 <- enrichGO(gene = cluster3_genes, 
+                        OrgDb = org.Mm.eg.db,
+                        keyType = "SYMBOL", 
+                        ont = "BP", 
+                        pvalueCutoff = 0.05)
+
+go_cluster4 <- enrichGO(gene = cluster4_genes, 
+                        OrgDb = org.Mm.eg.db,
+                        keyType = "SYMBOL", 
+                        ont = "BP", 
+                        pvalueCutoff = 0.05)
+
+go_cluster5 <- enrichGO(gene = cluster5_genes, 
+                        OrgDb = org.Mm.eg.db,
+                        keyType = "SYMBOL", 
+                        ont = "BP", 
+                        pvalueCutoff = 0.05)
+
+# Visualize enrichment results
+dotplot(go_cluster1, showCategory = 15) + ggtitle("GO Enrichment for Cluster 1")
+dotplot(go_cluster2, showCategory = 15) + ggtitle("GO Enrichment for Cluster 2")
+dotplot(go_combined, showCategory = 10) + ggtitle("GO Enrichment for Combined (Cluster 2 + 4)")
+dotplot(go_cluster3, showCategory = 10) + ggtitle("GO Enrichment for Cluster 3")
+dotplot(go_cluster4, showCategory = 15) + ggtitle("GO Enrichment for Cluster 4")
+dotplot(go_cluster5, showCategory = 15) + ggtitle("GO Enrichment for Cluster 5")
+
+# Convert enrichment results to data frames
+df_cluster1 <- as.data.frame(go_cluster1)
+df_cluster2 <- as.data.frame(go_cluster2)
+df_combined <- as.data.frame(go_combined)
+df_cluster3 <- as.data.frame(go_cluster3)
+df_cluster4 <- as.data.frame(go_cluster4)
+df_cluster5 <- as.data.frame(go_cluster5)
+
+# Preview geneID column (gene lists per GO term)
+head(df_cluster1$geneID)
+
+# Save each result to a CSV file
+write.csv(df_cluster1, "GO_cluster1_results.csv", row.names = FALSE)
+write.csv(df_cluster2, "GO_cluster2_results.csv", row.names = FALSE)
+write.csv(df_combined, "GO_combined_cluster2_4_results.csv", row.names = FALSE)
+write.csv(df_cluster3, "GO_cluster3_results.csv", row.names = FALSE)
+write.csv(df_cluster4, "GO_cluster4_results.csv", row.names = FALSE)
+write.csv(df_cluster5, "GO_cluster5_results.csv", row.names = FALSE)
