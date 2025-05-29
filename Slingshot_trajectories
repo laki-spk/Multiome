@@ -215,6 +215,7 @@ CM_subset$lineage <- apply(pt, 1, function(x) {
   }
 })
 
+CM_subset <- CM_subset[, CM_subset$lineage != "Shared"]
 
 table(CM_subset$lineage, CM_subset$origin)
 
@@ -236,11 +237,72 @@ Inflammatory_Genes <- list(c(
   "Il1b", "Tnf", "Ccl2", "Ccl3", "Cxcl1", "Nfkbia", "Stat1", "Tlr2", "Tlr4", "Il6"
 ))
 
+Fibrosis_Genes <- list(c(
+  "Tgfb1", "Tgfbr1", "Tgfbr2", "Acta2", "Col1a1", "Col3a1", "Pdgfra", "Pdgfrb",
+  "Ctgf", "Serpine1", "Lox", "Loxl2", "Mmp2", "Mmp9", "Fn1", "Thbs1", "Il11", "Postn"
+))
+
+Senescence_Genes <- list(c(
+  "Cdkn1a", "Cdkn2a", "Trp53", "Mdm2", "Serpine1", "Il6", "Cxcl1", "Cxcl2", "Tnf",
+  "Glb1", "Hmga2", "Gadd45a"
+))
+
+Lipid_Metabolism_Genes <- list(c(
+  "Pparg", "Ppara", "Cpt1b", "Fasn", "Scd1", "Lpl", "Apob", "Apoe", "Fabp3", "Fabp4",
+  "Acaca", "Acadm", "Hmgcr", "Cd36", "Srebf1"
+))
+
+Cell_Adhesion_Genes <- list(c(
+  "Cdh2", "Cdh5", "Itga5", "Itgb1", "Vcam1", "Icam1", "Pecam1", "Ncam1", "Jam2",
+  "Alcam", "Ctnnb1"
+))
+
+ECM_Genes <- list(c(
+  "Col1a1", "Col3a1", "Col4a1", "Col5a1", "Fn1", "Lox", "Loxl2", "Mmp2", "Mmp9",
+  "Mmp14", "Timp1", "Timp2", "Eln", "Postn", "Thbs1", "Thbs2", "Dcn", "Bgn"
+))
+
+Glycolysis_Genes <- list(c("Hk1", "Hk2", "Pfkl", "Aldoa", "Gapdh", "Pkm", "Ldha"))
+OXPHOS_Genes <- list(c("Ndufa9", "Ndufb8", "Cox4i1", "Atp5f1a", "Uqcrc2"))
+FAO_Genes <- list(c("Cpt1b", "Acadm", "Acadvl", "Ppara", "Acsl1"))
+Hypoxia_Genes <- list(c("Hif1a", "Egln1", "Vegfa", "Slc2a1"))
+UPR_Genes <- list(c("Hspa5", "Atf4", "Atf6", "Ddit3", "Xbp1"))
+Autophagy_Genes <- list(c("Becn1", "Map1lc3b", "Atg5", "Sqstm1"))
+Apoptosis_Genes <- list(c("Bax", "Bcl2", "Casp3", "Casp9"))
+ROS_Genes <- list(c("Nfe2l2", "Sod1", "Sod2", "Gpx1", "Cat"))
+Ribosomal_Genes <- list(c("Rpl13a", "Rplp0", "Rps3", "Rps6"))
+DDR_Genes <- list(c("Brca1", "Atm", "Atr", "Chek1", "Chek2"))
+Wnt_Genes <- list(c("Ctnnb1", "Wnt2", "Wnt11", "Fzd2", "Axin2"))
+Hippo_Genes <- list(c("Yap1", "Tead1", "Lats1", "Lats2", "Amotl2"))
+Notch_Genes <- list(c("Notch1", "Dll4", "Jag1", "Hes1"))
+
+
+
 CM_subset <- AddModuleScore(CM_subset, features = CellCycle_Genes, name = "CellCycle")
 CM_subset <- AddModuleScore(CM_subset, features = Mitochondrial_Genes, name = "Mito")
 CM_subset <- AddModuleScore(CM_subset, features = Inflammatory_Genes, name = "Inflammation")
+CM_subset <- AddModuleScore(CM_subset, features = Fibrosis_Genes, name = "Fibrosis")
+CM_subset <- AddModuleScore(CM_subset, features = Senescence_Genes, name = "Senescence")
+CM_subset <- AddModuleScore(CM_subset, features = Lipid_Metabolism_Genes, name = "Lipid")
+CM_subset <- AddModuleScore(CM_subset, features = Cell_Adhesion_Genes, name = "Adhesion")
+CM_subset <- AddModuleScore(CM_subset, features = ECM_Genes, name = "ECM")
+CM_subset <- AddModuleScore(CM_subset, features = Glycolysis_Genes, name = "Glycolysis")
+CM_subset <- AddModuleScore(CM_subset, features = OXPHOS_Genes, name = "OXPHOS")
+CM_subset <- AddModuleScore(CM_subset, features = FAO_Genes, name = "FAO")
+CM_subset <- AddModuleScore(CM_subset, features = Hypoxia_Genes, name = "Hypoxia")
+CM_subset <- AddModuleScore(CM_subset, features = UPR_Genes, name = "UPR")
+CM_subset <- AddModuleScore(CM_subset, features = Autophagy_Genes, name = "Autophagy")
+CM_subset <- AddModuleScore(CM_subset, features = Apoptosis_Genes, name = "Apoptosis")
+CM_subset <- AddModuleScore(CM_subset, features = ROS_Genes, name = "ROS")
+CM_subset <- AddModuleScore(CM_subset, features = Ribosomal_Genes, name = "Ribosomal")
+CM_subset <- AddModuleScore(CM_subset, features = DDR_Genes, name = "DDR")
+CM_subset <- AddModuleScore(CM_subset, features = Wnt_Genes, name = "Wnt")
+CM_subset <- AddModuleScore(CM_subset, features = Hippo_Genes, name = "Hippo")
+CM_subset <- AddModuleScore(CM_subset, features = Notch_Genes, name = "Notch")
 
-FeaturePlot(CM_subset, features = c("CellCycle1", "Mito1", "Inflammation1"))
+
+
+FeaturePlot(CM_subset, features = c("CellCycle1", "Mito1", "Inflammation1", "Fibrosis1", "Senescence1", "Lipid1", "Adhesion1", "ECM1", "Glycolysis1", "OXPHOS1", "Hypoxia1", "ROS1", "DDR1", "Wnt1", "Hippo1", "Notch1", "Apoptosis1",  "FAO1", "UPR1", "Autophagy1","Ribosomal1"))
 
 CM_subset$pseudotime_L2 <- pseudotime[, 1]  # Lineage2 (TAC)
 CM_subset$pseudotime_L1 <- pseudotime[, 2]  # Lineage1 (Aging)
@@ -260,12 +322,12 @@ ggplot(df, aes(x = pseudotime_by_lineage, y = CellCycle1, color = lineage)) +
   ggtitle("Cell Cycle Dynamics across Lineages")
 
 # Fetch data
-df <- FetchData(CM_subset, vars = c("pseudotime_by_lineage", "CellCycle1", "Mito1", "Inflammation1", "lineage"))
+df <- FetchData(CM_subset, vars = c("pseudotime_by_lineage", "CellCycle1", "Mito1", "Inflammation1", "Fibrosis1", "Senescence1", "Lipid1", "Adhesion1", "ECM1", "Glycolysis1", "OXPHOS1", "Hypoxia1", "ROS1", "DDR1", "Wnt1", "Hippo1", "Notch1", "Apoptosis1",  "FAO1", "UPR1", "Autophagy1","Ribosomal1", "lineage"))
 
 # Convert to long format for ggplot
 library(tidyr)
 df_long <- df %>%
-  pivot_longer(cols = c("CellCycle1", "Mito1", "Inflammation1"),
+  pivot_longer(cols = c("CellCycle1", "Mito1", "Inflammation1", "Fibrosis1", "Senescence1", "Lipid1", "Adhesion1", "ECM1", "Glycolysis1", "OXPHOS1", "Hypoxia1", "ROS1", "DDR1", "Wnt1", "Hippo1", "Notch1", "Apoptosis1",  "FAO1", "UPR1", "Autophagy1","Ribosomal1"),
                names_to = "GeneProgram", values_to = "ModuleScore")
 
 df_long$lineage <- factor(df_long$lineage,
@@ -284,24 +346,14 @@ ggplot(df_long, aes(x = pseudotime_by_lineage, y = ModuleScore, color = lineage)
   theme_minimal(base_size = 14)
 
 
-# View cluster orderings for each lineage
-sds <- SlingshotDataSet(CM_sce)
-sds@lineages
 
 
-FeatureScatter(CM_subset, feature1 = "pseudotime_from_D4", feature2 = "CellCycle1", group.by = "lineage") +
-  ggtitle("Cell Cycle Score over Pseudotime")
 
-FeatureScatter(CM_subset, feature1 = "pseudotime_from_D4", feature2 = "Mito1", group.by = "lineage") +
-  ggtitle("Mitochondrial Score over Pseudotime")
 
-FeatureScatter(CM_subset, feature1 = "pseudotime_from_D4", feature2 = "Inflammation1", group.by = "lineage") +
-  ggtitle("Inflammation Score over Pseudotime")
 
-df <- FetchData(CM_subset, vars = c("pseudotime_from_D4", "CellCycle1", "lineage"))
-ggplot(df, aes(x = pseudotime_from_D4, y = CellCycle1, color = lineage)) +
-  geom_smooth() +
-  ggtitle("Cell Cycle Dynamics across Lineages")
+
+
+..........................................................................................................................................................................................
 
 DimPlot(CM_subset, group.by = "origin", reduction = "umap", label = TRUE) +
   geom_path(data = curve_df, aes(x = UMAP_1, y = UMAP_2, group = lineage), 
