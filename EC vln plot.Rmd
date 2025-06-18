@@ -1,0 +1,90 @@
+---
+title: "EC Vln plots"
+output:
+  html_document: default
+  pdf_document: default
+date: "2025-06-12"
+---
+
+```{r setup, include=FALSE}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+```
+
+```{r}
+EC <- readRDS("EC_cells.rds")
+# Set identity based on metadata column `origin`
+Idents(EC) <- EC$origin
+```
+
+Define EC panels
+
+```{r}
+ec_genes <- list(
+  EMT = c("Eng", "Sema6d"),
+  Immune = c("H2-K1", "Mgll", "Egfl7", "Cd36", "Il1r1","Rora"),
+  Notch = c("Robo2", "Tcim"),
+  Stress = c("Pdgfb", "Fut8" ),
+  Angiogenesis_TAC = c("Flt1", "Sema6a"),
+  ECM_TAC = c("Eln", "Foxp1", "Hdac9"),
+  Stress_TAC = c("Fabp4"),
+  Mus_org_dev = c("Foxp1", "Eln","Heg1","Hdac9","Mrtfb"),
+  Chemotaxis= c("Flt1","Sema6a", "Rock1" ),
+  prrs_Ube = c("Lyn","Rps6ka3","Ankrd17", "Mndal", "Ncor1","Ube3a", "Ube2k"),
+  Cell_Cycle = c("Cnot6l", "Cnot2",  "Ythdf3","Hecw2", "Wac", "Kmt2e", "Crebbp","Kmt2c", "Rasa1","Mkln1", "Ptprk","Pde4d", "Prkd1","Rap1a"),
+  Muscle_contrac= c( "Srgap2", "Arfgef1", "Itga6", "Rapgef1","Nedd9", "Dock4", "Ptprm", "Igf1r" ),
+  Muscle_contrac2= c("Sptan1", "Nrp1", "Kdr", "Cdh13", "Dlc1", "Prkce", "Pdgfb", "Cav1","Arhgap18")
+)
+```
+
+```{r}
+library(patchwork)
+
+# Define plotting function with save option
+plot_violin <- function(object, gene_list, title, filename) {
+  found_genes <- gene_list[gene_list %in% rownames(object)]
+  
+  if (length(found_genes) == 0) {
+    message("None of the genes found in object for ", title)
+    return(NULL)
+  }
+  
+  plots <- lapply(found_genes, function(gene) {
+    VlnPlot(object, features = gene, group.by = "origin", pt.size = 0) +
+      ggtitle(gene) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  })
+  
+  combined_plot <- wrap_plots(plots, ncol = 3) + plot_annotation(title = title)
+  
+  # Save to file
+  ggsave(filename, combined_plot, width = 20, height = 10)
+  return(combined_plot)
+}
+
+
+```
+
+# ==== Plot EC gene panels ====
+
+```{r, fig.width=10, fig.height=6}
+plot_violin(EC, ec_genes$EMT, "EMT (Aging, EC)", "EC_EMT_violin.pdf")
+plot_violin(EC, ec_genes$Immune, "Immune Activation (Aging, EC)", "EC_Immune_violin.pdf")
+plot_violin(EC, ec_genes$Stress, "Stress Response (Aging, EC)", "EC_Stress_violin.pdf")
+plot_violin(EC, ec_genes$Angiogenesis_TAC, "Angiogenesis (TAC, EC)", "EC_Angiogenesis_TAC_violin.pdf")
+plot_violin(EC, ec_genes$ECM_TAC, "ECM & Morphogenesis (TAC, EC)", "EC_ECM_TAC_violin.pdf")
+plot_violin(EC, ec_genes$Mus_org_dev, "Mus_org_dev Pathways (EC)", "Mus_org_dev_violin.pdf")
+plot_violin(EC, ec_genes$Stress_TAC, "Stress_TAC (TAC, EC)", "EC_ECM_TAC_violin.pdf")
+plot_violin(EC, ec_genes$prrs_Ube, "prrs_Ube", "prrs_Ube_violin.pdf")
+
+plot_violin(EC, ec_genes$Notch, "Notch (TAC, EC)", "EC_ECM_TAC_violin.pdf")
+plot_violin(EC, ec_genes$Chemotaxis, "Chemotaxis EC", "Chemotaxis_violin.pdf")
+```
+
+```{r, fig.width=10, fig.height=12}
+plot_violin(EC, ec_genes$Cell_Cycle, "Cell_Cycle (TAC, EC)", "EC_Cell_Cycle_violin.pdf")
+plot_violin(EC, ec_genes$Muscle_contrac, "Muscle_contrac (TAC down, EC)", "EC_TAC_down_violin.pdf")
+plot_violin(EC, ec_genes$Muscle_contrac2, "Muscle_contrac2 (TAC down, EC)", "EC_TAC_down2_violin.pdf")
+```

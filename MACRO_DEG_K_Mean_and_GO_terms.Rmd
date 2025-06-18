@@ -1,0 +1,371 @@
+---
+title: "DEG_heatmap_optimized_&_Go_terms_K_means_MACRO"
+output: html_document
+date: "2025-06-13"
+---
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(pheatmap)
+library(ggplot2)
+library(tibble)
+
+```
+# K mean Heatmaps
+
+Load your cell data
+
+```{r}
+MACRO <- readRDS("MACRO_cells.rds")
+```
+
+Create a 'condition' column
+
+```{r}
+MACRO@meta.data <- MACRO@meta.data %>%
+  mutate(
+    condition = case_when(
+      origin == "A4T" ~ "4M_TAC",
+      origin == "D4" ~ "4M",
+      origin == "D28" ~ "28M",
+      origin == "A24" ~ "24M", 
+      origin == "Neo" ~ "Neo",
+      TRUE ~ origin
+    ),
+    condition = factor(condition, levels = c("Neo", "4M", "4M_TAC", "24M", "28M"))
+  )
+
+# Differential expression
+de_list <- list()
+comparisons <- c("D28", "A4T", "Neo", "A24")
+
+for (cond in comparisons) {
+  de <- FindMarkers(MACRO, ident.1 = cond, ident.2 = "D4", group.by = "origin",
+                    logfc.threshold = 0.25, min.pct = 0.1, only.pos = FALSE)
+  de$gene <- rownames(de)
+  de$comparison <- cond
+  de_list[[cond]] <- de %>% filter(p_val_adj < 0.05)
+}
+```
+
+Extract DEG gene sets
+
+```{r}
+all_degs <- bind_rows(de_list)
+up_genes <- all_degs %>% filter(avg_log2FC > 0.25) %>% pull(gene) %>% unique()
+down_genes <- all_degs %>% filter(avg_log2FC < -0.25) %>% pull(gene) %>% unique()
+all_genes <- unique(c(up_genes, down_genes))
+```
+
+Subset and average expression
+
+```{r}
+MACRO_sub <- subset(MACRO, subset = origin %in% c("D4", "D28", "A4T", "Neo", "A24"))
+avg_expr <- AverageExpression(MACRO_sub, group.by = "origin", return.seurat = FALSE)
+avg_mat <- avg_expr$RNA[intersect(all_genes, rownames(avg_expr$RNA)), c("Neo", "A4T", "A24", "D28", "D4")]
+avg_mat_scaled <- t(scale(t(avg_mat)))
+```
+
+Create Elbow plot
+
+```{r}
+wss <- sapply(1:15, function(k) {
+  kmeans(avg_mat_scaled, centers = k, nstart = 25)$tot.withinss
+})
+```
+
+K-means clustering on all DEGs (scaled)
+
+```{r}
+set.seed(123)
+k <- 14
+km <- kmeans(avg_mat_scaled, centers = k)
+row_order <- order(km$cluster)
+```
+
+Plot Elbow plot
+
+```{r}
+#pdf("elbow_plot_all_DEGs.pdf")
+plot(1:15, wss, type = "b", pch = 19,
+     xlab = "Number of Clusters (k)",
+     ylab = "Total Within-Cluster Sum of Squares",
+     main = "Elbow Plot for All DEGs")
+#dev.off()
+```
+
+Plot DEG Expression heatmap (scaled Rows)
+
+```{r}
+#pdf("DEG_expression_heatmap_scaled_rows.pdf", width = 12, height = 8)
+MACRO_all <- pheatmap(avg_mat_scaled[row_order, ],
+         cluster_cols = TRUE, cluster_rows = FALSE,
+         show_rownames = FALSE, show_colnames = TRUE,
+         annotation_row = data.frame(Cluster = as.factor(km$cluster)),
+         fontsize = 10, main = "DEG Expression Heatmap (Scaled Rows)")
+#dev.off()
+ggsave("DEG Expression Heatmap (Scaled Rows).pdf", plot = MACRO_all, width = 8, height = 6)
+```
+
+Convert to a data.frame with gene names and cluster assignment
+
+```{r}
+gene_clusters <- data.frame(
+  gene = rownames(avg_mat_scaled),
+  cluster = km$cluster
+)
+
+# Save to CSV
+write.csv(gene_clusters, "gene_clusters_kmeans.csv", row.names = FALSE)
+```
+
+## Upregulated
+
+```{r}
+up_mat <- avg_mat[intersect(up_genes, rownames(avg_mat)), ]
+up_mat_scaled <- t(scale(t(up_mat)))
+
+wss_up <- sapply(1:10, function(k) {
+  kmeans(up_mat_scaled, centers = k, nstart = 25)$tot.withinss
+})
+
+#pdf("elbow_plot_upregulated.pdf")
+plot(1:10, wss_up, type = "b", pch = 19,
+     xlab = "Number of Clusters (k)",
+     ylab = "WSS",
+     main = "Elbow Plot for Upregulated Genes")
+#dev.off()
+
+
+set.seed(123)
+km_up <- kmeans(up_mat_scaled, centers = 5)
+up_order <- order(km_up$cluster)
+
+#pdf("upregulated_DEGs_heatmap_scaled_rows.pdf", width = 6, height = 8)
+MACRO_up <-  pheatmap(up_mat_scaled[up_order, ],
+         cluster_cols = TRUE, cluster_rows = FALSE,
+         show_rownames = FALSE,
+         annotation_row = data.frame(Cluster = as.factor(km_up$cluster)),
+         fontsize = 10, main = "Upregulated DEGs (Scaled Rows)")
+#dev.off()
+ggsave("Upregulated DEGs_5 (Scaled Rows).pdf", plot = MACRO_up, width = 8, height = 6)
+
+gene_clusters <- data.frame(
+  gene = rownames(up_mat_scaled),
+  cluster = km_up$cluster
+)
+
+write.csv(gene_clusters, "gene_clusters_up_kmeans_5.csv", row.names = FALSE)
+
+```
+
+## Downregulated
+
+```{r}
+down_mat <- avg_mat[intersect(down_genes, rownames(avg_mat)), ]
+down_mat_scaled <- t(scale(t(down_mat)))
+
+wss_down <- sapply(1:11, function(k) {
+  kmeans(down_mat_scaled, centers = k, nstart = 25)$tot.withinss
+})
+
+#pdf("elbow_plot_downregulated.pdf")
+plot(1:11, wss_down, type = "b", pch = 19,
+     xlab = "Number of Clusters (k)",
+     ylab = "WSS",
+     main = "Elbow Plot for Downregulated Genes")
+#dev.off()
+
+set.seed(123)
+km_down <- kmeans(down_mat_scaled, centers = 5)
+down_order <- order(km_down$cluster)
+
+#pdf("downregulated_DEGs_heatmap_scaled_rows.pdf", width = 6, height = 8)
+MACRO_down <- pheatmap(down_mat_scaled[down_order, ],
+         cluster_cols = TRUE, cluster_rows = FALSE,
+         show_rownames = FALSE,
+         annotation_row = data.frame(Cluster = as.factor(km_down$cluster)),
+         fontsize = 10, main = "Downregulated DEGs (Scaled Rows)")
+#dev.off()
+
+ggsave("Downregulated DEGs_5 (Scaled Rows).pdf", plot = MACRO_down, width = 8, height = 6)
+
+gene_clusters <- data.frame(
+  gene = rownames(down_mat_scaled),
+  cluster = km_down$cluster
+)
+
+write.csv(gene_clusters, "gene_clusters_down_kmeans_5.csv", row.names = FALSE)
+
+```
+
+# GO terms for K_means
+
+Load necessary libraries
+
+```{r}
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(ggplot2)
+```
+
+## Upregulated:
+
+Read the CSV file containing the upregulated DEGs and clusters
+
+```{r}
+gene_clusters <- read.csv("gene_clusters_up_kmeans_5.csv")
+
+# View the first few rows to inspect
+head(gene_clusters)
+
+# Extract genes for each cluster
+cluster1_genes <- gene_clusters$gene[gene_clusters$cluster == 1]
+cluster2_genes <- gene_clusters$gene[gene_clusters$cluster == 2]
+cluster3_genes <- gene_clusters$gene[gene_clusters$cluster == 3]
+cluster4_genes <- gene_clusters$gene[gene_clusters$cluster == 4]
+cluster5_genes <- gene_clusters$gene[gene_clusters$cluster == 5]
+
+
+# Perform GO enrichment analysis
+go_cluster1 <- enrichGO(gene = cluster1_genes, 
+                        OrgDb = org.Mm.eg.db,   
+                        keyType = "SYMBOL", 
+                        ont = "BP",             
+                        pvalueCutoff = 0.05)
+
+go_cluster2 <- enrichGO(gene = cluster2_genes, 
+                        OrgDb = org.Mm.eg.db,   
+                        keyType = "SYMBOL", 
+                        ont = "BP",             
+                        pvalueCutoff = 0.05)
+
+go_cluster3 <- enrichGO(gene = cluster3_genes, 
+                        OrgDb = org.Mm.eg.db,
+                        keyType = "SYMBOL", 
+                        ont = "BP", 
+                        pvalueCutoff = 0.05)
+
+go_cluster4 <- enrichGO(gene = cluster4_genes, 
+                        OrgDb = org.Mm.eg.db,
+                        keyType = "SYMBOL", 
+                        ont = "BP", 
+                        pvalueCutoff = 0.05)
+
+go_cluster5 <- enrichGO(gene = cluster5_genes, 
+                        OrgDb = org.Mm.eg.db,
+                        keyType = "SYMBOL", 
+                        ont = "BP", 
+                        pvalueCutoff = 0.05)
+
+```
+
+```{r, fig.width= 12, fig.height=8}
+# Visualize enrichment results
+barplot(go_cluster1, showCategory = 15) + ggtitle("GO Enrichment for Cluster 1")
+barplot(go_cluster2, showCategory = 15) + ggtitle("GO Enrichment for Cluster 2")
+barplot(go_cluster3, showCategory = 15) + ggtitle("GO Enrichment for Cluster 3")
+barplot(go_cluster4, showCategory = 15) + ggtitle("GO Enrichment for Cluster 4")
+barplot(go_cluster5, showCategory = 15) + ggtitle("GO Enrichment for Cluster 5")
+```
+
+```{r}
+# Convert enrichment results to data frames
+df_cluster1 <- as.data.frame(go_cluster1)
+df_cluster2 <- as.data.frame(go_cluster2)
+df_cluster3 <- as.data.frame(go_cluster3)
+df_cluster4 <- as.data.frame(go_cluster4)
+df_cluster5 <- as.data.frame(go_cluster5)
+
+# Preview geneID column (gene lists per GO term)
+head(df_cluster1$geneID)
+
+# Save each result to a CSV file
+write.csv(df_cluster1, "GO_cluster1_results.csv", row.names = FALSE)
+write.csv(df_cluster2, "GO_cluster2_results.csv", row.names = FALSE)
+write.csv(df_cluster3, "GO_cluster3_results.csv", row.names = FALSE)
+write.csv(df_cluster4, "GO_cluster4_results.csv", row.names = FALSE)
+write.csv(df_cluster5, "GO_cluster5_results.csv", row.names = FALSE)
+
+```
+
+## Downregulated:
+
+Read the CSV file containing the upregulated DEGs and clusters
+
+```{r}
+gene_clusters <- read.csv("gene_clusters_down_kmeans_5.csv")
+
+# View the first few rows to inspect
+head(gene_clusters)
+
+# Extract genes for each cluster
+cluster1_genes <- gene_clusters$gene[gene_clusters$cluster == 1]
+cluster2_genes <- gene_clusters$gene[gene_clusters$cluster == 2]
+cluster3_genes <- gene_clusters$gene[gene_clusters$cluster == 3]
+cluster4_genes <- gene_clusters$gene[gene_clusters$cluster == 4]
+cluster5_genes <- gene_clusters$gene[gene_clusters$cluster == 5]
+
+
+# Perform GO enrichment analysis
+go_cluster1 <- enrichGO(gene = cluster1_genes, 
+                        OrgDb = org.Mm.eg.db,   
+                        keyType = "SYMBOL", 
+                        ont = "BP",             
+                        pvalueCutoff = 0.05)
+
+go_cluster2 <- enrichGO(gene = cluster2_genes, 
+                        OrgDb = org.Mm.eg.db,   
+                        keyType = "SYMBOL", 
+                        ont = "BP",             
+                        pvalueCutoff = 0.05)
+
+go_cluster3 <- enrichGO(gene = cluster3_genes, 
+                        OrgDb = org.Mm.eg.db,
+                        keyType = "SYMBOL", 
+                        ont = "BP", 
+                        pvalueCutoff = 0.05)
+
+go_cluster4 <- enrichGO(gene = cluster4_genes, 
+                        OrgDb = org.Mm.eg.db,
+                        keyType = "SYMBOL", 
+                        ont = "BP", 
+                        pvalueCutoff = 0.05)
+
+go_cluster5 <- enrichGO(gene = cluster5_genes, 
+                        OrgDb = org.Mm.eg.db,
+                        keyType = "SYMBOL", 
+                        ont = "BP", 
+                        pvalueCutoff = 0.05)
+```
+
+```{r, fig.width= 12, fig.height=8}
+# Visualize enrichment results
+barplot(go_cluster1, showCategory = 15) + ggtitle("GO Enrichment for Cluster 1")
+#barplot(go_cluster2, showCategory = 15) + ggtitle("GO Enrichment for Cluster 2")
+barplot(go_cluster3, showCategory = 15) + ggtitle("GO Enrichment for Cluster 3")
+barplot(go_cluster4, showCategory = 15) + ggtitle("GO Enrichment for Cluster 4")
+#barplot(go_cluster5, showCategory = 15) + ggtitle("GO Enrichment for Cluster 5")
+
+```
+
+```{r} 
+# Convert enrichment results to data frames 
+df_cluster1 <-as.data.frame(go_cluster1) 
+df_cluster2 <- as.data.frame(go_cluster2)
+df_cluster3 <- as.data.frame(go_cluster3) 
+df_cluster4 <-as.data.frame(go_cluster4) 
+df_cluster5 <- as.data.frame(go_cluster5)
+
+# Preview geneID column (gene lists per GO term)
+
+head(df_cluster1$geneID)
+
+# Save each result to a CSV file
+
+write.csv(df_cluster1, "GO_cluster1_results.csv", row.names = FALSE)
+write.csv(df_cluster2, "GO_cluster2_results.csv", row.names = FALSE)
+write.csv(df_cluster3, "GO_cluster3_results.csv", row.names = FALSE)
+write.csv(df_cluster4, "GO_cluster4_results.csv", row.names = FALSE)
+write.csv(df_cluster5, "GO_cluster5_results.csv", row.names = FALSE)

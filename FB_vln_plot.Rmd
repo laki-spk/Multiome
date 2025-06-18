@@ -1,0 +1,116 @@
+---
+title: "FB Vln plots"
+output: html_document
+date: "2025-06-13"
+---
+
+```{r setup, include=FALSE}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+```
+
+
+```{r}
+FB <- readRDS("FB_cells.rds")
+# Set identity based on metadata column `origin`
+Idents(FB) <- FB$origin
+```
+
+```{r}
+library(patchwork)
+
+# Define plotting function with save option
+plot_violin <- function(object, gene_list, title, filename) {
+  found_genes <- gene_list[gene_list %in% rownames(object)]
+  
+  if (length(found_genes) == 0) {
+    message("None of the genes found in object for ", title)
+    return(NULL)
+  }
+  
+  plots <- lapply(found_genes, function(gene) {
+    VlnPlot(object, features = gene, group.by = "origin", pt.size = 0) +
+      ggtitle(gene) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  })
+  
+  combined_plot <- wrap_plots(plots, ncol = 3) + plot_annotation(title = title)
+  
+  # Save to file
+  ggsave(filename, combined_plot, width = 20, height = 10)
+  return(combined_plot)
+}
+
+
+```
+
+
+```{r, fig.width=10, fig.height=12}
+adhesion_genes <- c("Col8a1", "Iqgap1", "Nedd9", "Postn", "Itgbl1", "Svep1","Itgb5", "Phldb2", "Carmil1", "Itga9", "Ccdc80", "Rin2", "Fer")
+plot_violin(FB, adhesion_genes, "1", "1.pdf")
+tgfb_response_genes <- c("Aspn", "Smurf2", "Postn","Itgb5", "Col1a2", "Zfhx3", "Pmepa1", "Fstl1", "Sulf1", "Ldlrad4","Pmepa1")
+plot_violin(FB, tgfb_response_genes, "1", "1.pdf")
+ecm_organization_genes <- c("Col8a1", "Sulf1", "Apbb2", "Postn", "Adamts6", "Phldb2", "Col1a2", "Col5a2","Plod2", "Ccdc80")
+plot_violin(FB, ecm_organization_genes, "1", "1.pdf")
+actin_org_genes <- c("Mical2", "Myo1d", "Nox4", "Akap13","Iqgap1", "Itgb5","Fat1", "Phldb2", "Carmil1", "Rhoq", "Hip1",  "Fer")
+plot_violin(FB, actin_org_genes, "1", "1.pdf")
+
+```
+```{r, fig.width=10, fig.height=6}
+integrin_signaling_genes <- c("Itgbl1", "Itgb5","Itga9", "Gab2")
+plot_violin(FB, integrin_signaling_genes, "1", "1.pdf")
+connective_tissue_genes <- c("Creb3l2", "Sulf1", "Cfh", "Prkca","Arid5b")
+plot_violin(FB, connective_tissue_genes, "1", "1.pdf")
+homeostasis_genes <- c("Nox4", "Apbb2", "Prkca",  "Akt3","Aldh1a1")
+plot_violin(FB, homeostasis_genes, "1", "1.pdf")
+purine_metabolism_genes <- c("Cfh", "Fmo1", "Fmo2", "Rhoq")
+plot_violin(FB, purine_metabolism_genes, "1", "1.pdf")
+egfr_erbb_genes <- c("Iqgap1", "Hip1", "Plce1", "Fer")
+plot_violin(FB, egfr_erbb_genes , "1", "1.pdf")
+gtpase_genes <- c("Nedd9",  "Dock10",  "Akap13", "Dennd4a","Abca1")
+plot_violin(FB, gtpase_genes , "1", "1.pdf")
+
+
+```
+
+```{r, fig.width=10, fig.height=3}
+
+collagen_fibril_genes <- c("Col1a2", "Col5a2","Plod2")
+plot_violin(FB, collagen_fibril_genes, "1", "1.pdf")
+bmp_neg_reg_genes <- c("Fstl1", "Sulf1", "Smurf2")
+plot_violin(FB, bmp_neg_reg_genes, "1", "1.pdf")
+stress_fiber_genes <- c( "Nox4", "Carmil1", "Fer")
+plot_violin(FB, stress_fiber_genes , "1", "1.pdf")
+glucose_transport_genes <- c("Prkca", "Rhoq")
+plot_violin(FB, glucose_transport_genes , "1", "1.pdf")
+periphery_localization_genes <- c("Rhoq", "Nbea", "Kif1b")
+plot_violin(FB, periphery_localization_genes , "1", "1.pdf")
+amino_acid_biosynthesis_genes <- c("Gls", "Plod2", "Aldh1a1")
+plot_violin(FB, amino_acid_biosynthesis_genes , "1", "1.pdf")
+protein_heterooligomerization_genes <- c("Col1a2", "Gria3", "Pkd2")
+plot_violin(FB, protein_heterooligomerization_genes , "1", "1.pdf")
+
+```
+
+
+```{r, fig.width=10, fig.height=3}
+# in 28M
+FcR_signaling_and_Synaptic_vesicle_endocytosis <- c("Rap1a", "Cd47")
+plot_violin(FB, FcR_signaling_and_Synaptic_vesicle_endocytosis , "1", "1.pdf")
+Innate_immune_activation_and_IL1_signelling <- c("Ifi203", "Colec12", "Il1r1")
+plot_violin(FB, Innate_immune_activation_and_IL1_signelling , "1", "1.pdf")
+Actin_filament_organization <- c("Flna", "Rictor", "Cd47")
+plot_violin(FB, Actin_filament_organization , "1", "1.pdf")
+Positive_proteolysis <- c("Ifi203", "Sh3rf3")
+plot_violin(FB, Positive_proteolysis , "1", "1.pdf")
+Negative_IL12 <- c("Cd47")
+plot_violin(FB, Negative_IL12 , "1", "1.pdf")
+PRR_signaling <- c("Ifi203", "Colec12")
+plot_violin(FB, PRR_signaling , "1", "1.pdf")
+dsRNA_response <- c("Colec12")
+plot_violin(FB, dsRNA_response , "1", "1.pdf")
+Mesenchymal_cell_prolif <- c("Flna")
+plot_violin(FB, Mesenchymal_cell_prolif , "1", "1.pdf")
+```
